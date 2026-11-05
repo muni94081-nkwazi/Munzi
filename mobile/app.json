@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "Bulk",
+    "slug": "bulk-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "scheme": "bulk",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "backgroundColor": "#16213D"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ug.bulk.app",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Bulk uses Face ID to let you log in quickly and securely."
+      }
+    },
+    "android": {
+      "package": "ug.bulk.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#16213D"
+      },
+      "permissions": ["USE_BIOMETRIC", "USE_FINGERPRINT", "NOTIFICATIONS"],
+      "googleServicesFile": "./google-services.json"
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#F2A93B"
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Bulk uses Face ID to let you log in quickly and securely."
+        }
+      ]
+    ],
+    "extra": {
+      "apiBaseUrl": "http://localhost:5000/api"
+    }
+  }
+}

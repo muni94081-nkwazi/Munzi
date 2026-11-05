@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  :focus-visible {
+    outline: 2px solid #16213D;
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /*
+   * Signature element: the "ticket stub" card.
+   * Used for service listings, provider cards, and booking confirmations —
+   * a nod to the market-stall receipt this platform is named after ("Bulk").
+   */
+  .ticket {
+    @apply relative bg-white rounded-lg border border-ink/10 shadow-sm;
+  }
+  .ticket::before {
+    content: '';
+    @apply absolute -top-[1px] left-0 right-0 h-2 bg-perforation rounded-t-lg;
+  }
+  .ticket-punch {
+    @apply absolute -left-2 top-6 w-4 h-4 rounded-full bg-linen border border-ink/10;
+  }
+  .ticket-punch-right {
+    @apply absolute -right-2 top-6 w-4 h-4 rounded-full bg-linen border border-ink/10;
+  }
+
+  .stamp {
+    @apply inline-flex items-center gap-1 px-2.5 py-1 rounded-sm font-mono text-[11px]
+      font-semibold uppercase tracking-wider -rotate-2 border-2;
+  }
+  .stamp-pending   { @apply border-marigold text-marigold bg-marigold/10; }
+  .stamp-confirmed { @apply border-forest text-forest bg-forest/10; }
+  .stamp-completed { @apply border-ink text-ink bg-ink/5; }
+  .stamp-cancelled { @apply border-clay text-clay bg-clay/10; }
+
+  .btn-primary {
+    @apply bg-marigold text-ink font-display font-semibold px-5 py-2.5 rounded-md
+      hover:brightness-95 active:brightness-90 transition disabled:opacity-50
+      disabled:cursor-not-allowed;
+  }
+  .btn-secondary {
+    @apply bg-ink text-white font-display font-semibold px-5 py-2.5 rounded-md
+      hover:bg-ink/90 active:bg-ink/80 transition disabled:opacity-50
+      disabled:cursor-not-allowed;
+  }
+  .btn-outline {
+    @apply border border-ink/20 text-ink font-display font-semibold px-5 py-2.5
+      rounded-md hover:bg-ink/5 transition disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .input-field {
+    @apply w-full border border-ink/15 rounded-md px-3.5 py-2.5 bg-white
+      focus:border-ink/40 focus:ring-2 focus:ring-marigold/30 outline-none
+      placeholder:text-slate/60 transition;
+  }
+  .label-text {
+    @apply block text-sm font-medium text-ink/80 mb-1.5;
+  }
+  .error-text {
+    @apply text-clay text-sm mt-1;
+  }
+  .card {
+    @apply bg-white rounded-lg border border-ink/10 shadow-sm;
+  }
+}
