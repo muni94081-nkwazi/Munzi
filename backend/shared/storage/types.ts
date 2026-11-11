@@ -17,6 +17,10 @@ export interface StorageConfig {
   useSSL?: boolean;
   /** Whether to force path-style URLs (required for MinIO: true; optional for AWS: false). */
   forcePathStyle?: boolean;
+  /** Request timeout in milliseconds for S3 operations (default: 5000ms). */
+  requestTimeoutMs?: number;
+  /** Maximum retry attempts for transient network failures (default: 3). */
+  maxRetries?: number;
   /** Named buckets managed by the platform. */
   buckets: {
     media: string;
@@ -40,6 +44,11 @@ export interface UploadOptions {
   metadata?: Record<string, string>;
   /** Whether the object should be strictly private (true for KYC docs, default: false). */
   isPrivate?: boolean;
+  /**
+   * Explicit affirmative declaration required to upload into the public media bucket ('munzi-media').
+   * Uploads to the public media bucket without isPublicMedia: true are strictly rejected.
+   */
+  isPublicMedia?: boolean;
 }
 
 export interface UploadResult {
@@ -71,6 +80,11 @@ export interface PresignedUrlOptions {
   expiresInSeconds?: number;
   /** Content type expected on upload (for PUT presigned URLs). */
   contentType?: string;
+  /**
+   * Explicit affirmative declaration required to generate a presigned upload URL for the public media bucket ('munzi-media').
+   * Generating presigned upload URLs for the public media bucket without isPublicMedia: true is strictly rejected.
+   */
+  isPublicMedia?: boolean;
 }
 
 export interface DeleteOptions {
@@ -86,3 +100,17 @@ export interface ObjectMetadataResult {
   lastModified?: Date;
   metadata?: Record<string, string>;
 }
+
+export type AllowedKycMimeType = 'application/pdf' | 'image/jpeg' | 'image/png';
+
+export type AllowedPublicMediaNamespace = 'products/' | 'banners/' | 'categories/' | 'avatars/';
+
+export type AllowedPublicMediaMimeType = 'image/jpeg' | 'image/png' | 'image/webp' | 'video/mp4';
+
+export interface KycValidationResult {
+  isValid: boolean;
+  detectedFormat: 'pdf' | 'jpeg' | 'png';
+  mimeType: AllowedKycMimeType;
+  fileSizeBytes: number;
+}
+

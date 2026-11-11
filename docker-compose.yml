@@ -444,7 +444,10 @@ services:
         echo "[minio-init] creating buckets idempotently..."
         mc mb --ignore-existing myminio/munzi-media
         mc mb --ignore-existing myminio/munzi-kyc
-        echo "[minio-init] applying private access policies..."
+        echo "[minio-init] configuring bucket access policies..."
+        # munzi-media: public download for approved catalog media (images, banners, thumbnails)
+        mc anonymous set download myminio/munzi-media
+        # munzi-kyc: strictly private (no anonymous or public access)
         mc anonymous set none myminio/munzi-kyc
         echo "[minio-init] buckets initialized successfully."
     networks: [muni-network]

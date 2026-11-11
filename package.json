@@ -8,6 +8,7 @@
     "frontend/seller-center",
     "frontend/admin-panel",
     "backend",
+    "backend/shared",
     "backend/api-gateway",
     "backend/infrastructure",
     "backend/services/*"
