@@ -1,6 +1,12 @@
 import { prisma } from '../db/prisma.js';
 import { z } from 'zod';
 import type { Prisma, ProductStatus } from '../generated/prisma/index.js';
+import {
+  toInternalCondition,
+  toExternalCondition,
+  validateWholesaleTiers,
+  type ProductCondition,
+} from '../../../../shared/types/product.types.js';
 import { searchProducts, indexProduct, deleteProductFromIndex, ensureIndex } from './search.service.js';
 import { cached, bumpEntityVersion, entityVersion, CACHE_TTL } from '../../../../shared/cache/protected-cache.js';
 import { publish } from '../../../../shared/kafka/producer.js';
@@ -41,6 +47,15 @@ export const ImageUrlSchema = z
  * map or restate the price they just typed. `price` falls back to the
  * product's basePrice and `attributes` to `{}` in createProduct.
  */
+export const SpecificationItemSchema = z.object({
+  key:       z.string().min(1).max(100),
+  value:     z.string().min(1).max(1000),
+  group:     z.string().max(100).default('General'),
+  sortOrder: z.number().int().default(0),
+});
+
+export type SpecificationItemInput = z.input<typeof SpecificationItemSchema>;
+
 const InlineVariantSchema = z.object({
   sku:               z.string().min(1).max(100).optional(),  // generated when omitted
   attributes:        z.record(z.string()).default({}),
@@ -48,6 +63,7 @@ const InlineVariantSchema = z.object({
   compareAtPrice:    z.number().positive().optional(),
   stock:             z.number().int().min(0).default(0),
   lowStockThreshold: z.number().int().min(0).default(5),
+  barcode:           z.string().max(100).optional().nullable(),
   images:            z.array(ImageUrlSchema).default([]),
 });
 
@@ -62,24 +78,11 @@ export const CreateProductSchema = z.object({
   brand:          z.string().optional(),
   tags:           z.array(z.string()).default([]),
   images:         z.array(ImageUrlSchema).default([]),
-
-  // A seller chooses only between keeping a listing private and submitting it
-  // for review. ACTIVE is deliberately not accepted here: it is the outcome of
-  // moderation, not an input. Previously this defaulted to ACTIVE, which let
-  // any ROLE_SELLER publish straight to the storefront.
   status:         z.enum(['DRAFT', 'PENDING_APPROVAL']).default('PENDING_APPROVAL'),
-
-  /**
-   * SKUs to create alongside the product, in the same transaction.
-   *
-   * Optional, and when omitted createProduct still writes ONE default variant.
-   * That is not a convenience — it is what makes the product sellable at all.
-   * Stock lives only on ProductVariant; there is no product-level stock column,
-   * so formatProduct derives `inStock` from `variants.some(v => v.stock -
-   * v.reserved > 0)`. A product with no variants is therefore permanently
-   * out of stock no matter what an admin does with it, which is exactly what
-   * every product created through seller-center used to be.
-   */
+  condition:      z.string().optional(),
+  moq:            z.number().int().positive().nullable().optional(),
+  wholesaleTiers: z.unknown().optional(),
+  specifications: z.array(SpecificationItemSchema).max(100).optional(),
   variants:       z.array(InlineVariantSchema).max(100).optional(),
 });
 
@@ -118,6 +121,9 @@ export const ListProductsSchema = z.object({
   minPrice:   z.coerce.number().optional(),
   maxPrice:   z.coerce.number().optional(),
   minRating:  z.coerce.number().min(0).max(5).optional(),
+  condition:  z.string().optional(),     // e.g. 'new', 'used_like_new', or comma-separated
+  minMoq:     z.coerce.number().int().positive().optional(),
+  maxMoq:     z.coerce.number().int().positive().optional(),
   // NOT z.coerce.boolean(). That is `Boolean(value)`, and every non-empty
   // string is truthy — so `?inStock=false` and `?inStock=0` both parsed to
   // TRUE and filtered the results to in-stock only, the exact opposite of what
@@ -192,6 +198,27 @@ export async function listProducts(rawQuery: unknown) {
 
   if (params.minRating !== undefined) where.averageRating = { gte: params.minRating };
   if (params.sellerId)                where.sellerId = params.sellerId;
+
+  if (params.condition) {
+    const rawConditions = params.condition.split(',').map((c) => c.trim()).filter(Boolean);
+    const conditions = rawConditions.map((c) => toInternalCondition(c));
+    if (conditions.length === 1) {
+      where.condition = conditions[0];
+    } else if (conditions.length > 1) {
+      where.condition = { in: conditions };
+    }
+  }
+
+  if (params.maxMoq !== undefined) {
+    where.OR = [
+      { moq: null },
+      { moq: { lte: params.maxMoq } },
+    ];
+  }
+
+  if (params.minMoq !== undefined) {
+    where.moq = { gte: params.minMoq };
+  }
 
   if (params.inStock) {
     where.variants = { some: { active: true, stock: { gt: 0 } } };
@@ -535,12 +562,23 @@ async function availableSlug(
   );
 }
 
-export async function createProduct(sellerId: string, input: CreateProductInput) {
+export async function createProduct(sellerId: string, input: z.input<typeof CreateProductSchema>) {
   const validated = CreateProductSchema.parse(input);
 
-  // `variants` is a nested write, not a column — it must not reach product.create's
-  // `data` spread, which would fail at runtime on an unknown field.
-  const { variants, ...productFields } = validated;
+  // `variants` and `specifications` are nested writes, not columns — they must not reach product.create's
+  // `data` spread, which would fail at runtime on unknown fields.
+  const { variants, specifications, ...productFields } = validated;
+
+  const internalCondition = toInternalCondition(productFields.condition);
+
+  let validatedWholesaleTiers: unknown = null;
+  if (productFields.wholesaleTiers !== undefined && productFields.wholesaleTiers !== null) {
+    const tierValidation = validateWholesaleTiers(productFields.wholesaleTiers, productFields.basePrice);
+    if (!tierValidation.valid) {
+      throw Object.assign(new Error(tierValidation.error ?? 'Invalid wholesale tiers'), { status: 422 });
+    }
+    validatedWholesaleTiers = tierValidation.data;
+  }
 
   // No variants supplied means one default variant, not zero. See the note on
   // the schema field above: zero variants is an unsellable product.
@@ -550,6 +588,7 @@ export async function createProduct(sellerId: string, input: CreateProductInput)
         attributes:        {} as Record<string, string>,
         stock:             0,
         lowStockThreshold: 5,
+        barcode:           null,
         images:            [] as string[],
         sku:               undefined as string | undefined,
         price:             undefined as number | undefined,
@@ -566,6 +605,9 @@ export async function createProduct(sellerId: string, input: CreateProductInput)
         ...productFields,
         slug,
         sellerId,
+        condition:       internalCondition,
+        moq:             productFields.moq ?? null,
+        wholesaleTiers:  validatedWholesaleTiers ? (validatedWholesaleTiers as Prisma.InputJsonValue) : undefined,
         // Stamped only when the listing actually enters the queue, so the admin
         // view can order by "waiting longest" without treating drafts as pending.
         submittedAt: productFields.status === 'PENDING_APPROVAL' ? new Date() : null,
@@ -592,16 +634,31 @@ export async function createProduct(sellerId: string, input: CreateProductInput)
         compareAtPrice:    variant.compareAtPrice ?? productFields.compareAtPrice ?? null,
         stock:             variant.stock,
         lowStockThreshold: variant.lowStockThreshold,
+        barcode:           variant.barcode ?? null,
         images:            variant.images,
       })),
     });
 
+    if (specifications && specifications.length > 0) {
+      await tx.productSpecification.createMany({
+        data: specifications.map((s, idx) => ({
+          productId: product.id,
+          key:       s.key,
+          value:     s.value,
+          group:     s.group ?? 'General',
+          sortOrder: s.sortOrder ?? idx,
+        })),
+      });
+    }
+
     // Re-read through productInclude so the response carries the variants that
     // were just written — createMany returns a count, not rows.
-    return tx.product.findUniqueOrThrow({
+    const created = await tx.product.findUniqueOrThrow({
       where:   { id: product.id },
       include: productInclude,
     });
+
+    return formatProduct(created);
   });
 }
 
@@ -615,7 +672,7 @@ export async function createProduct(sellerId: string, input: CreateProductInput)
  * product should not pull it off the storefront.
  */
 const RE_MODERATION_FIELDS = [
-  'name', 'description', 'images', 'basePrice', 'compareAtPrice', 'categoryId', 'brand', 'slug',
+  'name', 'description', 'images', 'basePrice', 'compareAtPrice', 'categoryId', 'brand', 'slug', 'condition',
 ] as const satisfies readonly (keyof CreateProductInput)[];
 
 /**
@@ -648,7 +705,36 @@ export async function updateProduct(id: string, sellerId: string, input: Partial
   // seller's SKUs. Editing stock or options goes through the variant routes
   // (POST/PUT/DELETE /products/:id/variants), which check ownership per SKU
   // and leave the moderation state alone.
-  const { variants: _ignoredVariants, ...fields } = input;
+  const { variants: _ignoredVariants, specifications, ...fields } = input;
+
+  let internalCondition: ProductCondition | undefined;
+  if (fields.condition !== undefined) {
+    internalCondition = toInternalCondition(fields.condition);
+  }
+
+  let validatedWholesaleTiers: unknown = undefined;
+  if (fields.wholesaleTiers !== undefined) {
+    if (fields.wholesaleTiers === null) {
+      validatedWholesaleTiers = null;
+    } else {
+      const effectiveBasePrice = fields.basePrice !== undefined ? Number(fields.basePrice) : Number(existing.basePrice);
+      const tierValidation = validateWholesaleTiers(fields.wholesaleTiers, effectiveBasePrice);
+      if (!tierValidation.valid) {
+        throw Object.assign(new Error(tierValidation.error ?? 'Invalid wholesale tiers'), { status: 422 });
+      }
+      validatedWholesaleTiers = tierValidation.data;
+    }
+  } else if (fields.basePrice !== undefined && existing.wholesaleTiers) {
+    // When basePrice changes but wholesaleTiers is omitted, validate existing tiers against the new basePrice
+    const newBasePrice = Number(fields.basePrice);
+    const tierValidation = validateWholesaleTiers(existing.wholesaleTiers, newBasePrice);
+    if (!tierValidation.valid) {
+      throw Object.assign(
+        new Error(`Updating basePrice to ${newBasePrice} would invalidate existing wholesale tiers: ${tierValidation.error}`),
+        { status: 422 },
+      );
+    }
+  }
 
   const touchesModeratedField = RE_MODERATION_FIELDS.some(
     (field) => fields[field] !== undefined && !isEqual(fields[field], existing[field]),
@@ -660,19 +746,42 @@ export async function updateProduct(id: string, sellerId: string, input: Partial
   const needsReview =
     touchesModeratedField && (existing.status === 'ACTIVE' || existing.status === 'REJECTED');
 
-  const updated = await prisma.product.update({
-    where: { id },
-    data: needsReview
-      ? {
-          ...fields,
-          status:          'PENDING_APPROVAL',
-          submittedAt:     new Date(),
-          rejectionReason: null,
-          moderatedAt:     null,
-          moderatedBy:     null,
-        }
-      : fields,
-    include: productInclude,
+  const updatePayload: Prisma.ProductUpdateInput = {
+    ...fields,
+    condition:      internalCondition,
+    wholesaleTiers: validatedWholesaleTiers !== undefined ? (validatedWholesaleTiers as Prisma.InputJsonValue) : undefined,
+  };
+
+  const updated = await prisma.$transaction(async (tx) => {
+    if (specifications !== undefined) {
+      await tx.productSpecification.deleteMany({ where: { productId: id } });
+      if (specifications.length > 0) {
+        await tx.productSpecification.createMany({
+          data: specifications.map((s, idx) => ({
+            productId: id,
+            key:       s.key,
+            value:     s.value,
+            group:     s.group ?? 'General',
+            sortOrder: s.sortOrder ?? idx,
+          })),
+        });
+      }
+    }
+
+    return tx.product.update({
+      where: { id },
+      data: needsReview
+        ? {
+            ...updatePayload,
+            status:          'PENDING_APPROVAL',
+            submittedAt:     new Date(),
+            rejectionReason: null,
+            moderatedAt:     null,
+            moderatedBy:     null,
+          }
+        : updatePayload,
+      include: productInclude,
+    });
   });
 
   // The index has to follow every edit, not just the ones that trigger review.
@@ -1217,6 +1326,16 @@ const productInclude = {
   variants: {
     where:   { active: true },
     orderBy: { price: 'asc' as const },
+    include: {
+      attributeValues: {
+        include: {
+          attribute: { select: { id: true, name: true, slug: true, type: true, unit: true } },
+        },
+      },
+    },
+  },
+  specifications: {
+    orderBy: [{ sortOrder: 'asc' as const }, { key: 'asc' as const }],
   },
   reviews: {
     orderBy: { createdAt: 'desc' as const },
@@ -1227,45 +1346,140 @@ const productInclude = {
 type ProductWithRelations = Prisma.ProductGetPayload<{ include: typeof productInclude }>;
 
 /** Normalise DB product to match the legacy API shape the frontend expects */
-function formatProduct(p: ProductWithRelations) {
-  const lowestVariant = p.variants[0];
+function formatProduct(p: any) {
+  const variants = Array.isArray(p.variants) ? p.variants : [];
+  const lowestVariant = variants[0];
+  const images = Array.isArray(p.images) ? p.images : [];
   return {
     id:              p.id,
     name:            p.name,
     slug:            p.slug,
     description:     p.description,
     sku:             lowestVariant?.sku ?? p.id,
-    price:           lowestVariant ? Number(lowestVariant.price) : Number(p.basePrice),
+    price:           lowestVariant ? Number(lowestVariant.price) : (p.basePrice !== undefined ? Number(p.basePrice) : 0),
     compareAtPrice:  lowestVariant?.compareAtPrice ? Number(lowestVariant.compareAtPrice) : (p.compareAtPrice ? Number(p.compareAtPrice) : null),
-    currency:        p.currency,
-    stockQuantity:   p.variants.reduce((sum, v) => sum + Math.max(0, v.stock - v.reserved), 0),
-    inStock:         p.variants.some((v) => v.stock - v.reserved > 0),
-    lowStock:        p.variants.some((v) => v.stock - v.reserved > 0 && v.stock - v.reserved <= v.lowStockThreshold),
+    currency:        p.currency ?? 'UGX',
+    stockQuantity:   variants.reduce((sum: number, v: any) => sum + Math.max(0, (v.stock ?? 0) - (v.reserved ?? 0)), 0),
+    inStock:         variants.some((v: any) => (v.stock ?? 0) - (v.reserved ?? 0) > 0),
+    lowStock:        variants.some((v: any) => (v.stock ?? 0) - (v.reserved ?? 0) > 0 && (v.stock ?? 0) - (v.reserved ?? 0) <= (v.lowStockThreshold ?? 5)),
     weightKg:        null,
-    category:        p.category,
-    brand:           p.brand,
+    category:        p.category ?? null,
+    brand:           p.brand ?? null,
     sellerId:        p.sellerId,
     status:          p.status,
+    condition:       toExternalCondition(p.condition),
+    moq:             p.moq ?? null,
+    wholesaleTiers:  p.wholesaleTiers ?? null,
+    specifications:  Array.isArray(p.specifications) ? p.specifications.map((s: any) => ({
+      id:        s.id,
+      key:       s.key,
+      value:     s.value,
+      group:     s.group,
+      sortOrder: s.sortOrder,
+    })) : [],
     // Moderation state travels with the product so the seller can see why a
     // listing was declined and the admin queue can render its badges without a
     // second round-trip. Null on every public (ACTIVE) listing, so this leaks
     // nothing to shoppers.
-    rejectionReason: p.rejectionReason,
-    submittedAt:     p.submittedAt?.toISOString() ?? null,
-    moderatedAt:     p.moderatedAt?.toISOString() ?? null,
-    averageRating:   p.averageRating,
-    reviewCount:     p.reviewCount,
-    viewCount:       p.viewCount,
-    imageUrls:       p.images.length > 0 ? p.images : (lowestVariant?.images ?? []),
-    tags:            p.tags,
-    variants:        p.variants.map((v) => ({
-      ...v,
-      price:          Number(v.price),
-      compareAtPrice: v.compareAtPrice ? Number(v.compareAtPrice) : null,
-      availableStock: v.stock - v.reserved,
-      inStock:        v.stock - v.reserved > 0,
+    rejectionReason: p.rejectionReason ?? null,
+    submittedAt:     p.submittedAt ? (typeof p.submittedAt === 'string' ? p.submittedAt : p.submittedAt.toISOString()) : null,
+    moderatedAt:     p.moderatedAt ? (typeof p.moderatedAt === 'string' ? p.moderatedAt : p.moderatedAt.toISOString()) : null,
+    averageRating:   p.averageRating ?? 0,
+    reviewCount:     p.reviewCount ?? 0,
+    viewCount:       p.viewCount ?? 0,
+    imageUrls:       images.length > 0 ? images : (lowestVariant?.images ?? []),
+    tags:            Array.isArray(p.tags) ? p.tags : [],
+    variants:        variants.map((v: any) => ({
+      id:                v.id,
+      productId:         v.productId,
+      sku:               v.sku,
+      attributes:        v.attributes ?? {},
+      price:             Number(v.price ?? 0),
+      compareAtPrice:    v.compareAtPrice ? Number(v.compareAtPrice) : null,
+      stock:             v.stock ?? 0,
+      reserved:          v.reserved ?? 0,
+      lowStockThreshold: v.lowStockThreshold ?? 5,
+      barcode:           v.barcode ?? null,
+      weightKg:          v.weightKg ?? null,
+      length:            v.length ?? null,
+      width:             v.width ?? null,
+      height:            v.height ?? null,
+      images:            Array.isArray(v.images) ? v.images : [],
+      active:            v.active ?? true,
+      createdAt:         v.createdAt,
+      updatedAt:         v.updatedAt,
+      availableStock:    (v.stock ?? 0) - (v.reserved ?? 0),
+      inStock:           (v.stock ?? 0) - (v.reserved ?? 0) > 0,
+      attributeValues:   Array.isArray(v.attributeValues) ? v.attributeValues.map((av: any) => ({
+        id:          av.id,
+        attributeId: av.attributeId,
+        name:        av.attribute?.name,
+        slug:        av.attribute?.slug,
+        type:        av.attribute?.type,
+        unit:        av.attribute?.unit,
+        value:       av.value,
+      })) : [],
     })),
-    createdAt:       p.createdAt.toISOString(),
-    updatedAt:       p.updatedAt.toISOString(),
+    createdAt:       p.createdAt ? (typeof p.createdAt === 'string' ? p.createdAt : p.createdAt.toISOString()) : new Date().toISOString(),
+    updatedAt:       p.updatedAt ? (typeof p.updatedAt === 'string' ? p.updatedAt : p.updatedAt.toISOString()) : new Date().toISOString(),
   };
+}
+
+export async function getProductSpecifications(
+  productId: string,
+  caller?: { userId?: string; roles?: string[] },
+) {
+  const product = await prisma.product.findUniqueOrThrow({
+    where:  { id: productId },
+    select: { id: true, sellerId: true, status: true },
+  });
+
+  const isPublic = PUBLIC_STATUSES.includes(product.status as any);
+  if (!isPublic) {
+    const isOwner = Boolean(caller?.userId && caller.userId === product.sellerId);
+    const isAdmin = Boolean(caller?.roles && (caller.roles.includes('ROLE_ADMIN') || caller.roles.includes('ROLE_SUPER_ADMIN')));
+    if (!isOwner && !isAdmin) {
+      throw Object.assign(new Error('Product not found'), { status: 404 });
+    }
+  }
+
+  return prisma.productSpecification.findMany({
+    where:   { productId },
+    orderBy: [{ sortOrder: 'asc' }, { key: 'asc' }],
+  });
+}
+
+export async function setProductSpecifications(
+  productId: string,
+  sellerId: string,
+  specs: SpecificationItemInput[],
+) {
+  const product = await prisma.product.findUniqueOrThrow({ where: { id: productId } });
+  if (product.sellerId !== sellerId) {
+    throw Object.assign(new Error('Forbidden'), { status: 403 });
+  }
+
+  const validated = z.array(SpecificationItemSchema).max(100).parse(specs);
+
+  await prisma.$transaction(async (tx) => {
+    await tx.productSpecification.deleteMany({ where: { productId } });
+    if (validated.length > 0) {
+      await tx.productSpecification.createMany({
+        data: validated.map((s, idx) => ({
+          productId,
+          key:       s.key,
+          value:     s.value,
+          group:     s.group ?? 'General',
+          sortOrder: s.sortOrder ?? idx,
+        })),
+      });
+    }
+  });
+
+  await invalidateProduct(productId, product.slug);
+
+  return prisma.productSpecification.findMany({
+    where:   { productId },
+    orderBy: [{ sortOrder: 'asc' }, { key: 'asc' }],
+  });
 }

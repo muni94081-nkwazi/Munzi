@@ -39,6 +39,7 @@ model Product {
   sellerId String
   status   ProductStatus @default(PENDING_APPROVAL)
   variants ProductVariant[]
+  offers   ProductOffer[]
 }
 
 enum ProductStatus {
@@ -63,6 +64,7 @@ model ProductVariant {
   stock             Int       @default(0)
   reserved          Int       @default(0)
   lowStockThreshold Int       @default(5)
+  barcode           String?
   weightKg          Float?
   length            Float?
   width             Float?
@@ -70,26 +72,88 @@ model ProductVariant {
   images            String[]  @default([])
   active            Boolean   @default(true)
   reservations      InventoryReservation[]
+  offers            ProductOffer[]
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
+  @@unique([id, productId], name: "variant_product_unique")
   @@index([productId, active])
   @@index([active, stock])
+  @@index([sku])
 }
 
-// The only table inventory-service INSERTs into, via reserveInventory().
+model ProductOffer {
+  id                String                 @id @default(cuid())
+  productId         String
+  variantId         String
+  sellerId          String
+  sellerSku         String?
+  price             Decimal                @db.Decimal(12, 2)
+  compareAtPrice    Decimal?               @db.Decimal(12, 2)
+  currency          String                 @default("UGX")
+  condition         ProductCondition       @default(NEW)
+  conditionNote     String?
+  moq               Int                    @default(1)
+  wholesaleTiers    Json?
+  stock             Int                    @default(0)
+  reserved          Int                    @default(0)
+  lowStockThreshold Int                    @default(5)
+  status            OfferStatus            @default(ACTIVE)
+  isBuyBoxWinner    Boolean                @default(false)
+  product           Product                @relation(fields: [productId], references: [id], onDelete: Cascade)
+  variant           ProductVariant         @relation(fields: [variantId, productId], references: [id, productId], onDelete: Cascade)
+  reservations      InventoryReservation[]
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  @@unique([sellerId, sellerSku])
+  @@index([productId, status, price])
+  @@index([variantId, status, price])
+  @@index([sellerId, status])
+  @@index([status, stock])
+}
+
+enum ProductCondition {
+  NEW
+  LIKE_NEW
+  REFURBISHED
+  USED_EXCELLENT
+  USED_GOOD
+  USED_FAIR
+}
+
+enum OfferStatus {
+  ACTIVE
+  INACTIVE
+  OUT_OF_STOCK
+  SUSPENDED
+}
+
+enum ReservationStatus {
+  ACTIVE
+  RELEASED
+  CONSUMED
+  EXPIRED
+}
+
+// The table inventory-service updates and queries during reservation and deductions.
 model InventoryReservation {
-  id        String         @id @default(cuid())
+  id        String            @id @default(cuid())
   variantId String
-  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  variant   ProductVariant    @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  offerId   String?
+  offer     ProductOffer?     @relation(fields: [offerId], references: [id], onDelete: Restrict)
   userId    String?
   sessionId String
   quantity  Int
+  status    ReservationStatus @default(ACTIVE)
   expiresAt DateTime
-  createdAt DateTime       @default(now())
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @default(now()) @updatedAt
 
   @@index([variantId])
-  @@index([expiresAt])
+  @@index([offerId, status])
+  @@index([expiresAt, status])
   @@index([sessionId])
   @@index([sessionId, variantId])
 }

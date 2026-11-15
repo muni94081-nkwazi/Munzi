@@ -1,13 +1,14 @@
 import 'dotenv/config';
 import express from 'express';
 import { internalCors } from '../../../shared/http/internal-cors.js';
-import { requireRole } from '../../../shared/http/service-auth.middleware.js';
+import { requireRole, optionalAuth } from '../../../shared/http/service-auth.middleware.js';
 import multer from 'multer';
 
 // ── Controllers ───────────────────────────────────────────────────────────────
 import * as productController  from './controllers/product.controller.js';
 import * as reviewController   from './controllers/review.controller.js';
 import * as categoryController from './controllers/category.controller.js';
+import * as categoryAttributeController from './controllers/category-attribute.controller.js';
 import * as variantController  from './controllers/variant.controller.js';
 import * as importController   from './controllers/import.controller.js';
 
@@ -58,15 +59,26 @@ app.use(
 
 // ── Category Routes ───────────────────────────────────────────────────────────
 
+const requireAdmin = requireRole('ROLE_ADMIN', 'ROLE_SUPER_ADMIN');
+const requireSeller = requireRole('ROLE_SELLER', 'ROLE_ADMIN', 'ROLE_SUPER_ADMIN');
+
 // Public reads
 app.get('/api/v1/categories',            categoryController.getTree);
 app.get('/api/v1/categories/flat',       categoryController.getFlat);
 app.get('/api/v1/categories/:id',        categoryController.getOne);
 
-// Admin CRUD
+// Category Attribute Templates
+app.get('/api/v1/categories/:id/attributes', categoryAttributeController.listByCategory);
+
+// Admin Category CRUD
 app.post  ('/api/v1/admin/categories',     categoryController.create);
 app.patch ('/api/v1/admin/categories/:id', categoryController.update);
 app.delete('/api/v1/admin/categories/:id', categoryController.remove);
+
+// Admin Category Attribute CRUD
+app.post  ('/api/v1/admin/categories/:id/attributes',            requireAdmin, categoryAttributeController.create);
+app.patch ('/api/v1/admin/categories/:id/attributes/:attrId',    requireAdmin, categoryAttributeController.update);
+app.delete('/api/v1/admin/categories/:id/attributes/:attrId',    requireAdmin, categoryAttributeController.remove);
 
 // ── Product Routes ────────────────────────────────────────────────────────────
 
@@ -75,6 +87,7 @@ app.get('/api/v1/products',                   productController.list);
 app.get('/api/v1/products/slug/:slug',         productController.slug);
 app.get('/api/v1/products/trending',           productController.trending);
 app.get('/api/v1/products/:id/related',        productController.related);
+app.get('/api/v1/products/:id/specifications', optionalAuth, productController.getSpecifications);
 app.get('/api/v1/products/:id',                productController.get);
 
 // Seller mutations moved to /api/v1/seller/products (see below).
@@ -102,9 +115,9 @@ app.get   ('/api/v1/products/:id/variants',              variantController.getVa
 // variant must belong to `:id`, so the product id cannot be used to reach an
 // unrelated SKU.
 app.get   ('/api/v1/products/:id/variants/:variantId',   variantController.getVariantById);
-app.post  ('/api/v1/products/:id/variants',              variantController.createVariant);
-app.put   ('/api/v1/products/:id/variants/:variantId',   variantController.updateVariant);
-app.delete('/api/v1/products/:id/variants/:variantId',   variantController.deleteVariant);
+app.post  ('/api/v1/products/:id/variants',              requireSeller, variantController.createVariant);
+app.put   ('/api/v1/products/:id/variants/:variantId',   requireSeller, variantController.updateVariant);
+app.delete('/api/v1/products/:id/variants/:variantId',   requireSeller, variantController.deleteVariant);
 
 // ── Review Routes ─────────────────────────────────────────────────────────────
 
@@ -142,12 +155,12 @@ app.get('/api/v1/seller/products/export',          importController.exportProduc
 //
 // The role list mirrors the gateway's seller router (seller.routes.ts:11) so
 // admin support access is unchanged.
-const requireSeller = requireRole('ROLE_SELLER', 'ROLE_ADMIN', 'ROLE_SUPER_ADMIN');
 
 app.get   ('/api/v1/seller/products',      requireSeller, productController.sellerList);
 app.post  ('/api/v1/seller/products',      requireSeller, productController.create);
 app.get   ('/api/v1/seller/products/:id',  requireSeller, productController.sellerGet);
 app.put   ('/api/v1/seller/products/:id',  requireSeller, productController.update);
+app.put   ('/api/v1/seller/products/:id/specifications', requireSeller, productController.setSpecifications);
 app.delete('/api/v1/seller/products/:id',  requireSeller, productController.remove);
 
 // ── Admin Moderation Routes (/api/v1/admin/products) ──────────────────────────

@@ -275,3 +275,31 @@ export async function reindexSearch(_req: Request, res: Response): Promise<void>
     fail(res, error);
   }
 }
+
+/** GET /api/v1/products/:id/specifications */
+export async function getSpecifications(req: Request, res: Response): Promise<void> {
+  try {
+    const caller = res.locals.userId
+      ? {
+          userId: String(res.locals.userId),
+          roles:  (res.locals.roles as string[]) ?? [],
+        }
+      : undefined;
+    const specs = await productService.getProductSpecifications(req.params.id, caller);
+    res.json({ success: true, data: specs });
+  } catch (error: any) {
+    fail(res, error);
+  }
+}
+
+/** PUT /api/v1/seller/products/:id/specifications */
+export async function setSpecifications(req: Request, res: Response): Promise<void> {
+  try {
+    const sellerId = actorId(req, res);
+    if (!sellerId) return;
+    const specs = await productService.setProductSpecifications(req.params.id, String(sellerId), req.body);
+    res.json({ success: true, data: specs });
+  } catch (error: any) {
+    fail(res, error);
+  }
+}

@@ -1,19 +1,46 @@
 import { prisma } from '../db/prisma.js';
 import { refreshProductProjections } from './product.service.js';
+import { validateAttributeValue, getCategoryAncestorIds } from './category-attribute.service.js';
 import { z } from 'zod';
 
+async function runTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
+  if (typeof (prisma as any).$transaction === 'function') {
+    return (prisma as any).$transaction(fn);
+  }
+  return fn(prisma);
+}
+
+export const VariantAttributeValueInputSchema = z.object({
+  attributeId: z.string().min(1),
+  value:       z.string().min(1).max(500),
+});
+
 export const CreateVariantSchema = z.object({
-  sku:          z.string().min(1).max(100).optional(), // auto-generated if omitted
-  attributes:   z.record(z.string()),  // { color: 'Red', size: 'M' }
-  price:        z.number().positive(),
-  compareAtPrice: z.number().positive().optional(),
-  stock:        z.number().int().min(0),
+  sku:               z.string().min(1).max(100).optional(), // auto-generated if omitted
+  attributes:        z.record(z.string()).default({}),      // { color: 'Red', size: 'M' }
+  price:             z.number().positive(),
+  compareAtPrice:    z.number().positive().optional(),
+  stock:             z.number().int().min(0),
   lowStockThreshold: z.number().int().min(0).default(5),
-  weightKg:     z.number().positive().optional(),
-  length:       z.number().positive().optional(),
-  width:        z.number().positive().optional(),
-  height:       z.number().positive().optional(),
-  images:       z.array(z.string().url()).default([]),
+  barcode:           z.string().max(100).optional().nullable(),
+  weightKg:          z.number().positive().optional(),
+  length:            z.number().positive().optional(),
+  width:             z.number().positive().optional(),
+  height:            z.number().positive().optional(),
+  images:            z.array(z.string().url()).default([]),
+  attributeValues:   z.array(VariantAttributeValueInputSchema)
+    .refine(
+      (items) => {
+        const seen = new Set<string>();
+        for (const item of items) {
+          if (seen.has(item.attributeId)) return false;
+          seen.add(item.attributeId);
+        }
+        return true;
+      },
+      { message: 'Duplicate attribute IDs are not allowed in variant attribute values.' },
+    )
+    .optional(),
 });
 
 export const UpdateVariantSchema = CreateVariantSchema.partial();
@@ -89,12 +116,17 @@ export async function getVariantById(variantId: string, productId?: string) {
           category: { select: { slug: true } },
         },
       },
+      attributeValues: {
+        include: {
+          attribute: { select: { id: true, name: true, slug: true, type: true, unit: true } },
+        },
+      },
     },
   });
 
   if (!variant) return null;
 
-  const { product, ...rest } = variant;
+  const { product, attributeValues, ...rest } = variant;
 
   return {
     ...rest,
@@ -114,6 +146,15 @@ export async function getVariantById(variantId: string, productId?: string) {
     categoryId:     product.categoryId ?? null,
     categorySlug:   product.category?.slug ?? null,
     currency:       product.currency,
+    attributeValues: attributeValues ? attributeValues.map((av) => ({
+      id:          av.id,
+      attributeId: av.attributeId,
+      name:        av.attribute?.name,
+      slug:        av.attribute?.slug,
+      type:        av.attribute?.type,
+      unit:        av.attribute?.unit,
+      value:       av.value,
+    })) : [],
   };
 }
 
@@ -121,13 +162,34 @@ export async function getVariantsByProduct(productId: string) {
   const variants = await prisma.productVariant.findMany({
     where:   { productId, active: true },
     orderBy: { createdAt: 'asc' },
+    include: {
+      attributeValues: {
+        include: {
+          attribute: { select: { id: true, name: true, slug: true, type: true, unit: true } },
+        },
+      },
+    },
   });
   // Attach availableStock computed field
-  return variants.map((v) => ({
-    ...v,
-    availableStock: v.stock - v.reserved,
-    inStock: v.stock - v.reserved > 0,
-  }));
+  return variants.map((v) => {
+    const { attributeValues, ...rest } = v;
+    return {
+      ...rest,
+      price:          Number(v.price),
+      compareAtPrice: v.compareAtPrice === null ? null : Number(v.compareAtPrice),
+      availableStock: v.stock - v.reserved,
+      inStock:        v.stock - v.reserved > 0,
+      attributeValues: attributeValues ? attributeValues.map((av) => ({
+        id:          av.id,
+        attributeId: av.attributeId,
+        name:        av.attribute?.name,
+        slug:        av.attribute?.slug,
+        type:        av.attribute?.type,
+        unit:        av.attribute?.unit,
+        value:       av.value,
+      })) : [],
+    };
+  });
 }
 
 /** Raised when a caller tries to modify a product they do not own. */
@@ -162,7 +224,7 @@ export class VariantNotFoundError extends Error {
 async function assertVariantOwnedBy(variantId: string, sellerId: string) {
   const variant = await prisma.productVariant.findUnique({
     where:   { id: variantId },
-    include: { product: { select: { sellerId: true } } },
+    include: { product: { select: { sellerId: true, categoryId: true } } },
   });
 
   if (!variant) throw new VariantNotFoundError();
@@ -177,6 +239,63 @@ async function assertVariantOwnedBy(variantId: string, sellerId: string) {
 }
 
 /**
+ * Validates variant attribute values:
+ * 1. Rejects duplicate attribute IDs in payload (422)
+ * 2. Resolves category hierarchy and ensures attributes belong to product category or ancestors (422)
+ * 3. Enforces that attributes are active (422)
+ * 4. Validates value conforming to attribute type definition (422)
+ */
+async function validateVariantAttributes(
+  attributeValues: Array<{ attributeId: string; value: string }>,
+  productCategoryId: string | null | undefined,
+) {
+  // 1. Check for duplicate attribute IDs in request
+  const seenIds = new Set<string>();
+  for (const av of attributeValues) {
+    if (seenIds.has(av.attributeId)) {
+      throw Object.assign(
+        new Error(`Duplicate attribute ID "${av.attributeId}" in variant attribute values. Each attribute can only be assigned once per variant.`),
+        { status: 422 },
+      );
+    }
+    seenIds.add(av.attributeId);
+  }
+
+  // 2. Resolve allowed category hierarchy
+  let allowedCategoryIds = new Set<string>();
+  if (productCategoryId) {
+    const ancestorIds = await getCategoryAncestorIds(productCategoryId);
+    allowedCategoryIds = new Set(ancestorIds);
+  }
+
+  // 3. Validate each attribute against definitions and hierarchy
+  for (const av of attributeValues) {
+    const attr = await prisma.categoryAttribute.findUnique({
+      where: { id: av.attributeId },
+    });
+    if (!attr) {
+      throw Object.assign(new Error(`Category attribute with id "${av.attributeId}" not found`), { status: 404 });
+    }
+    if (!attr.active) {
+      throw Object.assign(
+        new Error(`Category attribute "${attr.name}" (${attr.slug}) is inactive and cannot be assigned.`),
+        { status: 422 },
+      );
+    }
+    if (!allowedCategoryIds.has(attr.categoryId)) {
+      throw Object.assign(
+        new Error(`Category attribute "${attr.name}" does not belong to the product's category or any of its ancestors.`),
+        { status: 422 },
+      );
+    }
+    const valCheck = validateAttributeValue(attr, av.value);
+    if (!valCheck.valid) {
+      throw Object.assign(new Error(valCheck.error ?? 'Invalid attribute value'), { status: 422 });
+    }
+  }
+}
+
+/**
  * Add a variant (a purchasable SKU with its own price) to a product.
  *
  * `sellerId` is the authenticated caller, and it is checked against the
@@ -188,7 +307,7 @@ async function assertVariantOwnedBy(variantId: string, sellerId: string) {
  */
 export async function createVariant(
   productId: string,
-  input: z.infer<typeof CreateVariantSchema>,
+  input: z.input<typeof CreateVariantSchema>,
   sellerId: string,
 ) {
   const validated = CreateVariantSchema.parse(input);
@@ -202,11 +321,39 @@ export async function createVariant(
     throw new NotProductOwnerError();
   }
 
-  // Auto-generate SKU if not provided
-  const sku = validated.sku ?? generateSKU(product.slug, validated.attributes);
+  const { attributeValues, ...variantFields } = validated;
 
-  const variant = await prisma.productVariant.create({
-    data: { ...validated, sku, productId, price: validated.price, stock: validated.stock },
+  // Validate attributeValues if provided
+  if (attributeValues && attributeValues.length > 0) {
+    await validateVariantAttributes(attributeValues, product.categoryId);
+  }
+
+  // Auto-generate SKU if not provided
+  const sku = variantFields.sku ?? generateSKU(product.slug, variantFields.attributes);
+
+  const variant = await runTransaction(async (tx) => {
+    const v = await tx.productVariant.create({
+      data: {
+        ...variantFields,
+        sku,
+        productId,
+        price:   variantFields.price,
+        stock:   variantFields.stock,
+        barcode: variantFields.barcode ?? null,
+      },
+    });
+
+    if (attributeValues && attributeValues.length > 0 && tx.variantAttributeValue?.createMany) {
+      await tx.variantAttributeValue.createMany({
+        data: attributeValues.map((av) => ({
+          variantId:   v.id,
+          attributeId: av.attributeId,
+          value:       av.value,
+        })),
+      });
+    }
+
+    return v;
   });
 
   // A new SKU changes the product's price range, its stock total and whether
@@ -228,15 +375,43 @@ export async function createVariant(
  */
 export async function updateVariant(
   variantId: string,
-  input: z.infer<typeof UpdateVariantSchema>,
+  input: z.input<typeof UpdateVariantSchema>,
   sellerId: string,
 ) {
-  await assertVariantOwnedBy(variantId, sellerId);
+  const existingVariant = await assertVariantOwnedBy(variantId, sellerId);
 
   const validated = UpdateVariantSchema.parse(input);
-  const variant = await prisma.productVariant.update({
-    where: { id: variantId },
-    data:  validated,
+  const { attributeValues, ...variantFields } = validated;
+
+  if (attributeValues && attributeValues.length > 0) {
+    await validateVariantAttributes(attributeValues, existingVariant.product.categoryId);
+  }
+
+  const variant = await runTransaction(async (tx) => {
+    const v = await tx.productVariant.update({
+      where: { id: variantId },
+      data:  {
+        ...variantFields,
+        barcode: variantFields.barcode !== undefined ? (variantFields.barcode ?? null) : undefined,
+      },
+    });
+
+    if (attributeValues !== undefined && tx.variantAttributeValue) {
+      if (tx.variantAttributeValue.deleteMany) {
+        await tx.variantAttributeValue.deleteMany({ where: { variantId } });
+      }
+      if (attributeValues.length > 0 && tx.variantAttributeValue.createMany) {
+        await tx.variantAttributeValue.createMany({
+          data: attributeValues.map((av) => ({
+            variantId,
+            attributeId: av.attributeId,
+            value:       av.value,
+          })),
+        });
+      }
+    }
+
+    return v;
   });
 
   // The write that made this necessary: a price or stock edit here is what a
