@@ -168,11 +168,12 @@ export async function getCategoryAncestorIds(categoryId: string): Promise<string
     if (typeof (prisma as any).$queryRaw === 'function') {
       const ancestors = await prisma.$queryRaw<Array<{ id: string }>>`
         WITH RECURSIVE ancestors AS (
-          SELECT id, "parentId", 0 AS depth FROM "Category" WHERE id = ${categoryId}
+          SELECT id, "parentId", 0 AS depth, ARRAY[id]::text[] AS visited
+          FROM "Category" WHERE id = ${categoryId}
           UNION ALL
-          SELECT c.id, c."parentId", a.depth + 1
+          SELECT c.id, c."parentId", a.depth + 1, a.visited || c.id
           FROM "Category" c JOIN ancestors a ON c.id = a."parentId"
-          WHERE a.depth < 20
+          WHERE NOT (c.id = ANY(a.visited)) AND a.depth < 20
         )
         SELECT id FROM ancestors;
       `;

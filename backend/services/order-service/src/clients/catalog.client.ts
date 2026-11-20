@@ -133,6 +133,27 @@ export interface CatalogVariant {
   images?:     string[];
 }
 
+export interface CatalogOffer {
+  id:              string;
+  productId:       string;
+  variantId:       string;
+  sellerId:        string;
+  sellerSku?:      string | null;
+  price:           number;
+  currency:        string;
+  condition:       string;
+  moq:             number;
+  wholesaleTiers?: Array<{ minQuantity: number; unitPrice: number }> | null;
+  stock:           number;
+  reserved:        number;
+  availableStock:  number;
+  status:          string;
+  productName:     string;
+  productSku:      string;
+  productImageUrl: string | null;
+  weightKg?:       number | null;
+}
+
 interface VariantEnvelope {
   data?: {
     id:            string;
@@ -231,6 +252,172 @@ export async function fetchProduct(productId: string, actorId?: string): Promise
     sellerId:  product.sellerId,
     currency:  product.currency ?? 'UGX',
   };
+}
+
+// ─── ProductOffer ─────────────────────────────────────────────────────────────
+
+interface OfferEnvelope {
+  success?: boolean;
+  data?: {
+    id:              string;
+    productId:       string;
+    variantId:       string;
+    sellerId:        string;
+    sellerSku?:      string | null;
+    price:           number | string;
+    currency:        string;
+    condition:       string;
+    moq:             number;
+    wholesaleTiers?: Array<{ minQuantity: number; unitPrice: number | string }> | null;
+    stock:           number;
+    reserved:        number;
+    availableStock:  number;
+    status:          string;
+    product?: {
+      id:         string;
+      name:       string;
+      status:     string;
+      thumbnail?: string | null;
+      images?:    string[];
+    };
+    variant?: {
+      id:        string;
+      sku:       string;
+      weightKg?: number | null;
+    };
+  };
+}
+
+/**
+ * Authoritative offer details from product-service's public offer endpoint.
+ *
+ * Returns the offer's seller, price (with wholesale tier resolution), MOQ,
+ * condition and stock. Throws ItemUnavailableError when the offer is not found
+ * or is not ACTIVE.
+ */
+export async function fetchOffer(
+  offerId: string,
+  quantity: number,
+  actorId?: string,
+): Promise<CatalogOffer> {
+  const res = await request<OfferEnvelope>(
+    `${PRODUCT_SERVICE_URL}/api/v1/public/offers/${encodeURIComponent(offerId)}`,
+    { service: 'product-service', actorId },
+  );
+
+  if (res.status === 404 || !res.data?.data) throw new ItemUnavailableError(offerId);
+  if (!res.ok) throw new CatalogUnavailableError('product-service', `status ${res.status}`);
+
+  const offer = res.data.data;
+  if (offer.status !== 'ACTIVE') throw new ItemUnavailableError(offerId);
+  if (offer.product && offer.product.status !== 'ACTIVE') throw new ItemUnavailableError(offerId);
+
+  let unitPrice = Number(offer.price);
+  if (offer.wholesaleTiers && offer.wholesaleTiers.length > 0) {
+    const sorted = [...offer.wholesaleTiers].sort((a, b) => Number(b.minQuantity) - Number(a.minQuantity));
+    const tier = sorted.find((t) => quantity >= Number(t.minQuantity));
+    if (tier) unitPrice = Number(tier.unitPrice);
+  }
+
+  if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+    throw new CatalogUnavailableError('product-service', `offer ${offerId} has no usable price`);
+  }
+
+  return {
+    id:              offer.id,
+    productId:       offer.productId,
+    variantId:       offer.variantId,
+    sellerId:        offer.sellerId,
+    sellerSku:       offer.sellerSku ?? null,
+    price:           unitPrice,
+    currency:        offer.currency ?? 'UGX',
+    condition:       offer.condition,
+    moq:             Number(offer.moq || 1),
+    wholesaleTiers:  offer.wholesaleTiers?.map((t) => ({ minQuantity: Number(t.minQuantity), unitPrice: Number(t.unitPrice) })) ?? null,
+    stock:           Number(offer.stock),
+    reserved:        Number(offer.reserved),
+    availableStock:  Number(offer.availableStock ?? (Number(offer.stock) - Number(offer.reserved))),
+    status:          offer.status,
+    productName:     offer.product?.name ?? offerId,
+    productSku:      offer.variant?.sku ?? '',
+    productImageUrl: offer.product?.thumbnail ?? offer.product?.images?.[0] ?? null,
+    weightKg:        offer.variant?.weightKg ?? null,
+  };
+}
+
+// ─── Offer Inventory ──────────────────────────────────────────────────────────
+
+/**
+ * Take a TTL-bounded hold on offer stock, using inventory-service's
+ * offer-specific reservation path from Gate 2C.3.
+ */
+export async function reserveOfferStock(
+  offerId: string,
+  quantity: number,
+  sessionId: string,
+  reference: string,
+  actorId?: string,
+): Promise<string> {
+  const res = await request<ReserveEnvelope>(
+    `${INVENTORY_SERVICE_URL}/api/v1/inventory/offers/${encodeURIComponent(offerId)}/reserve`,
+    { service: 'inventory-service', method: 'POST', actorId, body: { quantity, sessionId, userId: actorId } },
+  );
+
+  if (res.status === 409) {
+    const available = Number(/only (\d+)/i.exec(res.data.message ?? '')?.[1]);
+    throw new OutOfStockError(reference, Number.isFinite(available) ? available : undefined);
+  }
+  if (res.status === 404) throw new ItemUnavailableError(reference);
+  if (!res.ok || !res.data.data?.reservationId) {
+    throw new CatalogUnavailableError('inventory-service', res.data.message ?? `status ${res.status}`);
+  }
+
+  return res.data.data.reservationId;
+}
+
+/**
+ * Settle an offer hold into a real stock movement.
+ */
+export async function deductOfferStock(
+  offerId: string,
+  quantity: number,
+  reservationId: string | undefined,
+  actorId?: string,
+): Promise<void> {
+  const res = await request<{ message?: string }>(
+    `${INVENTORY_SERVICE_URL}/api/v1/inventory/offers/${encodeURIComponent(offerId)}/deduct`,
+    {
+      service: 'inventory-service',
+      method:  'POST',
+      actorId,
+      body:    { quantity, ...(reservationId ? { reservationId } : {}) },
+    },
+  );
+
+  if (!res.ok) {
+    throw new StockSettlementError(
+      offerId,
+      res.data.message ?? `inventory-service returned ${res.status}`,
+    );
+  }
+}
+
+/**
+ * Best-effort release of an offer hold taken earlier in the same request.
+ */
+export async function releaseOfferStock(offerId: string, reservationId: string, actorId?: string): Promise<void> {
+  try {
+    await request(
+      `${INVENTORY_SERVICE_URL}/api/v1/inventory/offers/${encodeURIComponent(offerId)}/release`,
+      { service: 'inventory-service', method: 'POST', actorId, body: { reservationId } },
+    );
+  } catch (err) {
+    logger.error('offer reservation release failed — will expire via TTL', { detail: {
+      offerId,
+      reservationId,
+      error: (err as Error).message,
+    } });
+  }
 }
 
 // ─── Inventory ────────────────────────────────────────────────────────────────

@@ -221,9 +221,10 @@ export async function runCheckoutSaga(session: CheckoutSession): Promise<Checkou
     markStep(session, 'PRICE_CART', 'completed');
     await sessionRepository.save(session);
 
-    // ── 2. Reserve inventory, one call per variant ───────────────────────
+    // ── 2. Reserve inventory, one call per variant or offer ────────────
     // Sorted so every concurrent checkout takes row locks in the same order.
-    const ordered = [...priced.items].sort((a, b) => a.variantId.localeCompare(b.variantId));
+    const lockKey = (line: PricedLine) => (line.offerId ? `offer:${line.offerId}` : `variant:${line.variantId}`);
+    const ordered = [...priced.items].sort((a, b) => lockKey(a).localeCompare(lockKey(b)));
     const reserved: ReservedLine[] = [];
 
     // Holds this session already owns, from an earlier run of this saga.
@@ -237,17 +238,26 @@ export async function runCheckoutSaga(session: CheckoutSession): Promise<Checkou
     // Reused holds are deliberately NOT pushed onto the compensation stack: the
     // run that created them owns their release, and releasing a hold twice on a
     // later failure would give back stock this session never took.
-    const heldAlready = new Map((session.reservations ?? []).map((r) => [r.variantId, r.reservationId]));
+    const heldAlready = new Map<string, string>();
+    for (const r of session.reservations ?? []) {
+      if (r.offerId) heldAlready.set(`offer:${r.offerId}`, r.reservationId);
+      if (r.variantId) heldAlready.set(`variant:${r.variantId}`, r.reservationId);
+    }
 
     for (const line of ordered) {
-      const existingHold = heldAlready.get(line.variantId);
+      const lineKey = line.offerId ? `offer:${line.offerId}` : `variant:${line.variantId}`;
+      const existingHold = heldAlready.get(lineKey);
       if (existingHold) {
         reserved.push({ ...line, reservationId: existingHold });
         continue;
       }
 
+      const reservePath = line.offerId
+        ? `${SERVICES.inventory}/api/v1/inventory/offers/${encodeURIComponent(line.offerId)}/reserve`
+        : `${SERVICES.inventory}/api/v1/inventory/${encodeURIComponent(line.variantId)}/reserve`;
+
       const res = await call<{ data?: { reservationId: string }; message?: string }>(
-        `${SERVICES.inventory}/api/v1/inventory/${encodeURIComponent(line.variantId)}/reserve`,
+        reservePath,
         {
           service: 'inventory-service',
           method:  'POST',
@@ -268,11 +278,15 @@ export async function runCheckoutSaga(session: CheckoutSession): Promise<Checkou
       const reservationId = res.data.data.reservationId;
       reserved.push({ ...line, reservationId });
 
+      const releasePath = line.offerId
+        ? `${SERVICES.inventory}/api/v1/inventory/offers/${encodeURIComponent(line.offerId)}/release`
+        : `${SERVICES.inventory}/api/v1/inventory/${encodeURIComponent(line.variantId)}/release`;
+
       compensations.push({
-        label: `release ${line.variantId}`,
+        label: `release ${line.offerId ? `offer ${line.offerId}` : `variant ${line.variantId}`}`,
         run: async () => {
           await call(
-            `${SERVICES.inventory}/api/v1/inventory/${encodeURIComponent(line.variantId)}/release`,
+            releasePath,
             { service: 'inventory-service', method: 'POST', actorId: session.userId, body: { reservationId } },
           );
         },
@@ -285,6 +299,7 @@ export async function runCheckoutSaga(session: CheckoutSession): Promise<Checkou
     // process dies mid-payment.
     session.reservations = reserved.map((line) => ({
       variantId:     line.variantId,
+      offerId:       line.offerId,
       reservationId: line.reservationId,
     }));
     await sessionRepository.save(session);
@@ -552,6 +567,10 @@ export async function runCheckoutSaga(session: CheckoutSession): Promise<Checkou
           items: reserved.map((line) => ({
             productId:     line.productId,
             variantId:     line.variantId,
+            offerId:       line.offerId,
+            sellerSku:     line.sellerSku,
+            condition:     line.condition,
+            sellerId:      line.sellerId,
             quantity:      line.quantity,
             reservationId: line.reservationId,
           })),
@@ -675,8 +694,12 @@ export async function runCheckoutSaga(session: CheckoutSession): Promise<Checkou
     // a brief inventory discrepancy the expiry worker and audit will catch.
     for (const line of reserved) {
       try {
+        const deductPath = line.offerId
+          ? `${SERVICES.inventory}/api/v1/inventory/offers/${encodeURIComponent(line.offerId)}/deduct`
+          : `${SERVICES.inventory}/api/v1/inventory/${encodeURIComponent(line.variantId)}/deduct`;
+
         const res = await call(
-          `${SERVICES.inventory}/api/v1/inventory/${encodeURIComponent(line.variantId)}/deduct`,
+          deductPath,
           {
             service: 'inventory-service',
             method:  'POST',
@@ -690,6 +713,7 @@ export async function runCheckoutSaga(session: CheckoutSession): Promise<Checkou
           sessionId: session.id,
           orderId,
           variantId: line.variantId,
+          offerId: line.offerId,
           reservationId: line.reservationId,
           error: (err as Error).message,
         });

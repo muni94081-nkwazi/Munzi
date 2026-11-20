@@ -35,16 +35,20 @@ export class ItemUnavailableError extends Error {
 }
 
 export interface PricedLine {
-  productId:   string;
-  variantId:   string;
-  sellerId:    string;
-  productName: string;
-  quantity:    number;
+  productId:    string;
+  variantId:    string;
+  offerId?:     string;
+  sellerSku?:   string;
+  condition?:   string;
+  moq?:         number;
+  sellerId:     string;
+  productName:  string;
+  quantity:     number;
   /** Authoritative unit price, re-read from product-service. */
-  unitPrice:   number;
-  lineTotal:   number;
+  unitPrice:    number;
+  lineTotal:    number;
   /** From the catalogue, so category-restricted coupons can be decided. */
-  categoryId?: string | null;
+  categoryId?:  string | null;
   /**
    * The category's slug, which is what tax-service matches zero-rating on.
    * It keys its rules by name ('food', 'medical', 'agricultural', 'books'),
@@ -89,11 +93,15 @@ export interface PricedCart {
 /** The cart itself, as cart-service models it. */
 interface Cart {
   items?: Array<{
-    productId:   string;
-    variantId?:  string;
-    sellerId:    string;
-    productName: string;
-    quantity:    number;
+    productId:    string;
+    variantId?:   string;
+    offerId?:     string;
+    sellerSku?:   string;
+    condition?:   string;
+    moq?:         number;
+    sellerId:     string;
+    productName:  string;
+    quantity:     number;
   }>;
   /** Read for the code only. The amount it carries is a display estimate
    *  computed from client-supplied prices and is never trusted here. */
@@ -130,6 +138,41 @@ interface VariantResponse {
     id: string; price: number | string; productId: string;
     categoryId?: string | null; categorySlug?: string | null;
     weightKg?: number | null; length?: number | null; width?: number | null; height?: number | null;
+  };
+}
+
+interface OfferResponse {
+  success?: boolean;
+  data?: {
+    id:              string;
+    productId:       string;
+    variantId:       string;
+    sellerId:        string;
+    sellerSku?:      string | null;
+    price:           number | string;
+    compareAtPrice?: number | string | null;
+    currency:        string;
+    condition:       string;
+    moq:             number;
+    wholesaleTiers?: Array<{ minQuantity: number; unitPrice: number | string }> | null;
+    stock:           number;
+    reserved:        number;
+    availableStock:  number;
+    status:          string;
+    product?: {
+      id:          string;
+      name:        string;
+      status:      string;
+      categoryId?: string | null;
+    };
+    variant?: {
+      id:       string;
+      sku:      string;
+      weightKg?: number | null;
+      length?:   number | null;
+      width?:    number | null;
+      height?:   number | null;
+    };
   };
 }
 
@@ -170,51 +213,113 @@ export async function priceCart(
   const items: PricedLine[] = [];
 
   for (const line of rawItems) {
-    if (!line.variantId) {
-      throw new ItemUnavailableError(line.productName ?? line.productId);
-    }
     if (!Number.isInteger(line.quantity) || line.quantity < 1) {
       throw new ItemUnavailableError(line.productName ?? line.productId);
     }
 
-    // Nested under the product, matching product-service's own route shape.
-    // Both ids come from the cart the server just read by identity, never from
-    // the request body — and product-service cross-checks that the variant
-    // really belongs to the product, so a mismatched pair 404s rather than
-    // pricing the wrong SKU.
-    const variantRes = await call<VariantResponse>(
-      `${SERVICES.product}/api/v1/products/${encodeURIComponent(line.productId)}`
-        + `/variants/${encodeURIComponent(line.variantId)}`,
-      { service: 'product-service', actorId },
-    );
+    if (line.offerId) {
+      const offerRes = await call<OfferResponse>(
+        `${SERVICES.product}/api/v1/public/offers/${encodeURIComponent(line.offerId)}`,
+        { service: 'product-service', actorId },
+      );
 
-    if (!variantRes.ok || !variantRes.data.data) {
-      throw new ItemUnavailableError(line.productName ?? line.productId);
+      if (!offerRes.ok || !offerRes.data?.data) {
+        throw new ItemUnavailableError(line.productName ?? line.productId);
+      }
+
+      const offer = offerRes.data.data;
+      if (offer.status !== 'ACTIVE' || (offer.product && offer.product.status !== 'ACTIVE')) {
+        throw new ItemUnavailableError(line.productName ?? line.productId);
+      }
+
+      const moq = Number(offer.moq || 1);
+      if (line.quantity < moq) {
+        throw new ItemUnavailableError(
+          `Minimum order quantity for "${line.productName || offer.product?.name}" is ${moq}`,
+        );
+      }
+
+      const available = Number(offer.availableStock ?? (Number(offer.stock) - Number(offer.reserved)));
+      if (line.quantity > available) {
+        throw new ItemUnavailableError(line.productName ?? line.productId);
+      }
+
+      let unitPrice = Number(offer.price);
+      if (offer.wholesaleTiers && offer.wholesaleTiers.length > 0) {
+        const sortedTiers = [...offer.wholesaleTiers].sort((a, b) => Number(b.minQuantity) - Number(a.minQuantity));
+        const applicableTier = sortedTiers.find((t) => line.quantity >= Number(t.minQuantity));
+        if (applicableTier) {
+          unitPrice = Number(applicableTier.unitPrice);
+        }
+      }
+
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+        throw new PricingUnavailableError(`offer ${line.offerId} has no usable price`);
+      }
+
+      items.push({
+        productId:    offer.productId || line.productId,
+        variantId:    offer.variantId || line.variantId || '',
+        offerId:      line.offerId,
+        sellerSku:    offer.sellerSku ?? line.sellerSku,
+        condition:    offer.condition,
+        moq,
+        sellerId:     offer.sellerId, // authoritative seller assignment
+        productName:  offer.product?.name || line.productName,
+        quantity:     line.quantity,
+        unitPrice:    round2(unitPrice),
+        lineTotal:    round2(unitPrice * line.quantity),
+        categoryId:   offer.product?.categoryId ?? null,
+        categorySlug: null,
+        weightKg:     offer.variant?.weightKg ?? null,
+        lengthCm:     offer.variant?.length ?? null,
+        widthCm:      offer.variant?.width ?? null,
+        heightCm:     offer.variant?.height ?? null,
+      });
+    } else {
+      if (!line.variantId) {
+        throw new ItemUnavailableError(line.productName ?? line.productId);
+      }
+
+      // Nested under the product, matching product-service's own route shape.
+      // Both ids come from the cart the server just read by identity, never from
+      // the request body — and product-service cross-checks that the variant
+      // really belongs to the product, so a mismatched pair 404s rather than
+      // pricing the wrong SKU.
+      const variantRes = await call<VariantResponse>(
+        `${SERVICES.product}/api/v1/products/${encodeURIComponent(line.productId)}`
+          + `/variants/${encodeURIComponent(line.variantId)}`,
+        { service: 'product-service', actorId },
+      );
+
+      if (!variantRes.ok || !variantRes.data?.data) {
+        throw new ItemUnavailableError(line.productName ?? line.productId);
+      }
+
+      // Prisma serialises Decimal as a string; Number() handles both shapes.
+      const unitPrice = Number(variantRes.data.data.price);
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+        throw new PricingUnavailableError(`variant ${line.variantId} has no usable price`);
+      }
+
+      items.push({
+        productId:   line.productId,
+        variantId:   line.variantId,
+        sellerId:    line.sellerId,
+        productName: line.productName,
+        quantity:    line.quantity,
+        unitPrice:   round2(unitPrice),
+        lineTotal:   round2(unitPrice * line.quantity),
+        categoryId:  variantRes.data.data.categoryId ?? null,
+        categorySlug: variantRes.data.data.categorySlug ?? null,
+        weightKg:     variantRes.data.data.weightKg ?? null,
+        // product-service names these in centimetres without saying so in the
+        // field name; shipping-service's contract does.
+        lengthCm:     variantRes.data.data.length ?? null,
+        widthCm:      variantRes.data.data.width  ?? null,
+        heightCm:     variantRes.data.data.height ?? null,
+      });
     }
-
-    // Prisma serialises Decimal as a string; Number() handles both shapes.
-    const unitPrice = Number(variantRes.data.data.price);
-    if (!Number.isFinite(unitPrice) || unitPrice < 0) {
-      throw new PricingUnavailableError(`variant ${line.variantId} has no usable price`);
-    }
-
-    items.push({
-      productId:   line.productId,
-      variantId:   line.variantId,
-      sellerId:    line.sellerId,
-      productName: line.productName,
-      quantity:    line.quantity,
-      unitPrice:   round2(unitPrice),
-      lineTotal:   round2(unitPrice * line.quantity),
-      categoryId:  variantRes.data.data.categoryId ?? null,
-      categorySlug: variantRes.data.data.categorySlug ?? null,
-      weightKg:     variantRes.data.data.weightKg ?? null,
-      // product-service names these in centimetres without saying so in the
-      // field name; shipping-service's contract does.
-      lengthCm:     variantRes.data.data.length ?? null,
-      widthCm:      variantRes.data.data.width  ?? null,
-      heightCm:     variantRes.data.data.height ?? null,
-    });
   }
 
   const subtotal = round2(items.reduce((sum, i) => sum + i.lineTotal, 0));

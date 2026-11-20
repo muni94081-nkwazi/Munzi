@@ -2,7 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { redis } from '../utils/redis.js';
 import { Cart, CartItem } from '../models/cart.model.js';
 import { quoteCoupon } from '../clients/discount.client.js';
-import { availableStockFor } from '../clients/catalog.client.js';
+import { availableStockFor, fetchOfferDetails } from '../clients/catalog.client.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -11,31 +11,41 @@ const CART_TTL = parseInt(process.env.CART_TTL_SECONDS || '86400', 10);
 
 /**
  * A quantity above what the line permits.
- *
- * The service used to silently clamp with `Math.min(quantity, maxQuantity)` —
- * and only on the branch that merged into a line already in the cart. A FIRST
- * add was not bounded at all: asking for 5,012 of a 12-stock variant stored
- * 5,012, verified live. So the behaviour was neither "clamp" nor "reject", it
- * depended on whether the shopper happened to have that item already.
- *
- * Refusing is the honest option of the two. Clamping quietly changes what the
- * customer asked for, and it was never a stock control in any case: the bound
- * comes from `maxQuantity` in the request body, which the browser supplies.
- * Authoritative stock is enforced where it can be trusted — at reservation
- * during checkout.
  */
+export class CartQuantityError extends Error {
+  readonly status = 422;
+  constructor(readonly requested: number, readonly maxQuantity: number) {
+    super(`Only ${maxQuantity} of this item can be added — you asked for ${requested}.`);
+    this.name = 'CartQuantityError';
+  }
+}
+
+export class CartMoqError extends Error {
+  readonly status = 422;
+  constructor(readonly requested: number, readonly moq: number) {
+    super(`Minimum order quantity is ${moq} — you asked for ${requested}.`);
+    this.name = 'CartMoqError';
+  }
+}
+
+export class CartOfferInactiveError extends Error {
+  readonly status = 422;
+  constructor(readonly offerId: string, message = `Offer ${offerId} is no longer active.`) {
+    super(message);
+    this.name = 'CartOfferInactiveError';
+  }
+}
+
+export class CartOfferNotFoundError extends Error {
+  readonly status = 404;
+  constructor(readonly offerId: string) {
+    super(`Offer ${offerId} was not found.`);
+    this.name = 'CartOfferNotFoundError';
+  }
+}
+
 /**
  * The most of one variant a basket may hold, given what the catalogue has.
- *
- * `maxQuantity` on the request is the browser's own number, so on its own it
- * bounds nothing — a client sending 99999 got 99999, verified live against a
- * 3-stock variant. The catalogue's figure wins where it can be obtained; where
- * it cannot, the client's is all there is, and Add to Cart is not failed over a
- * peer service being slow.
- *
- * Still not a stock control: stock moves between the add and the checkout, and
- * two shoppers can hold the same last unit at once. The binding check is the
- * reservation inside the checkout saga.
  */
 async function permittedQuantity(
   productId: string,
@@ -45,14 +55,6 @@ async function permittedQuantity(
   if (!variantId) return clientMax;
   const available = await availableStockFor(productId, variantId);
   return available === null ? clientMax : available;
-}
-
-export class CartQuantityError extends Error {
-  readonly status = 422;
-  constructor(readonly requested: number, readonly maxQuantity: number) {
-    super(`Only ${maxQuantity} of this item can be added — you asked for ${requested}.`);
-    this.name = 'CartQuantityError';
-  }
 }
 
 function createEmptyCart(userId: string): Cart {
@@ -135,28 +137,99 @@ export class CartService {
 
   async addItem(userId: string, itemData: Omit<CartItem, 'id' | 'addedAt'>): Promise<Cart> {
     const cart = await this.getCart(userId);
-    const existingItem = cart.items.find(
-      (i) => i.productId === itemData.productId && i.variantId === itemData.variantId
-    );
 
-    // The quantity the line would end up holding, whether this is a first add
-    // or a top-up of one already in the cart.
-    const requested = (existingItem?.quantity ?? 0) + itemData.quantity;
-    const permitted = await permittedQuantity(itemData.productId, itemData.variantId, itemData.maxQuantity);
-    if (requested > permitted) {
-      throw new CartQuantityError(requested, permitted);
-    }
+    let finalItemData = { ...itemData };
 
-    if (existingItem) {
-      existingItem.quantity = requested;
-      // update price in case it changed
-      existingItem.price = itemData.price;
-    } else {
-      cart.items.push({
+    if (itemData.offerId) {
+      const offer = await fetchOfferDetails(itemData.offerId);
+      if (!offer) {
+        throw new CartOfferNotFoundError(itemData.offerId);
+      }
+      if (offer.status !== 'ACTIVE') {
+        throw new CartOfferInactiveError(itemData.offerId, `Offer ${itemData.offerId} is not active.`);
+      }
+      if (offer.product && offer.product.status !== 'ACTIVE') {
+        throw new CartOfferInactiveError(itemData.offerId, `Product for offer ${itemData.offerId} is not active.`);
+      }
+
+      const existingItem = cart.items.find((i) => i.offerId === itemData.offerId);
+      const requested = (existingItem?.quantity ?? 0) + itemData.quantity;
+
+      const moq = offer.moq ?? 1;
+      if (requested < moq) {
+        throw new CartMoqError(requested, moq);
+      }
+
+      if (requested > offer.availableStock) {
+        throw new CartQuantityError(requested, offer.availableStock);
+      }
+
+      // Calculate unit price according to wholesale tiers if defined
+      let unitPrice = offer.price;
+      if (offer.wholesaleTiers && offer.wholesaleTiers.length > 0) {
+        const applicableTier = [...offer.wholesaleTiers]
+          .sort((a, b) => b.minQuantity - a.minQuantity)
+          .find((t) => requested >= t.minQuantity);
+        if (applicableTier) {
+          unitPrice = applicableTier.unitPrice;
+        }
+      }
+
+      finalItemData = {
         ...itemData,
-        id: uuidv4(),
-        addedAt: new Date().toISOString(),
-      });
+        sellerId: offer.sellerId, // authoritative seller assignment
+        productId: offer.productId,
+        variantId: offer.variantId || itemData.variantId,
+        price: unitPrice,
+        sellerSku: offer.sellerSku ?? itemData.sellerSku,
+        condition: offer.condition,
+        moq: offer.moq,
+        currency: offer.currency || 'UGX',
+        maxQuantity: offer.availableStock,
+        productName: offer.product?.name || itemData.productName,
+        productImage: offer.product?.thumbnail || offer.product?.images?.[0] || itemData.productImage,
+        attributes: (offer.variant?.attributes as Record<string, unknown>) || itemData.attributes,
+      };
+
+      if (existingItem) {
+        existingItem.quantity = requested;
+        existingItem.price = unitPrice;
+        existingItem.sellerSku = finalItemData.sellerSku;
+        existingItem.condition = finalItemData.condition;
+        existingItem.moq = finalItemData.moq;
+        existingItem.currency = finalItemData.currency;
+        existingItem.maxQuantity = finalItemData.maxQuantity;
+      } else {
+        cart.items.push({
+          ...finalItemData,
+          id: uuidv4(),
+          addedAt: new Date().toISOString(),
+        });
+      }
+    } else {
+      const existingItem = cart.items.find(
+        (i) => !i.offerId && i.productId === itemData.productId && i.variantId === itemData.variantId && i.sellerId === itemData.sellerId,
+      );
+
+      // The quantity the line would end up holding, whether this is a first add
+      // or a top-up of one already in the cart.
+      const requested = (existingItem?.quantity ?? 0) + itemData.quantity;
+      const permitted = await permittedQuantity(itemData.productId, itemData.variantId, itemData.maxQuantity);
+      if (requested > permitted) {
+        throw new CartQuantityError(requested, permitted);
+      }
+
+      if (existingItem) {
+        existingItem.quantity = requested;
+        // update price in case it changed
+        existingItem.price = itemData.price;
+      } else {
+        cart.items.push({
+          ...itemData,
+          id: uuidv4(),
+          addedAt: new Date().toISOString(),
+        });
+      }
     }
 
     await recalculateCart(cart);
@@ -171,11 +244,40 @@ export class CartService {
     } else {
       const item = cart.items.find((i) => i.id === itemId);
       if (item) {
-        const permitted = await permittedQuantity(item.productId, item.variantId, item.maxQuantity);
-        if (quantity > permitted) {
-          throw new CartQuantityError(quantity, permitted);
+        if (item.offerId) {
+          const offer = await fetchOfferDetails(item.offerId);
+          if (!offer || offer.status !== 'ACTIVE') {
+            throw new CartOfferInactiveError(item.offerId, `Offer is no longer active.`);
+          }
+          if (offer.product && offer.product.status !== 'ACTIVE') {
+            throw new CartOfferInactiveError(item.offerId, `Product is no longer active.`);
+          }
+          const moq = offer.moq ?? 1;
+          if (quantity < moq) {
+            throw new CartMoqError(quantity, moq);
+          }
+          if (quantity > offer.availableStock) {
+            throw new CartQuantityError(quantity, offer.availableStock);
+          }
+          let unitPrice = offer.price;
+          if (offer.wholesaleTiers && offer.wholesaleTiers.length > 0) {
+            const applicableTier = [...offer.wholesaleTiers]
+              .sort((a, b) => b.minQuantity - a.minQuantity)
+              .find((t) => quantity >= t.minQuantity);
+            if (applicableTier) {
+              unitPrice = applicableTier.unitPrice;
+            }
+          }
+          item.price = unitPrice;
+          item.quantity = quantity;
+          item.maxQuantity = offer.availableStock;
+        } else {
+          const permitted = await permittedQuantity(item.productId, item.variantId, item.maxQuantity);
+          if (quantity > permitted) {
+            throw new CartQuantityError(quantity, permitted);
+          }
+          item.quantity = quantity;
         }
-        item.quantity = quantity;
       }
     }
     await recalculateCart(cart);
@@ -219,9 +321,12 @@ export class CartService {
     const cart = await this.getCart(userId);
     
     for (const gItem of guestItems) {
-      const existingItem = cart.items.find(
-        (i) => i.productId === gItem.productId && i.variantId === gItem.variantId
-      );
+      const existingItem = cart.items.find((i) => {
+        if (gItem.offerId && i.offerId) {
+          return i.offerId === gItem.offerId;
+        }
+        return !i.offerId && !gItem.offerId && i.productId === gItem.productId && i.variantId === gItem.variantId && i.sellerId === gItem.sellerId;
+      });
 
       if (existingItem) {
         existingItem.quantity = Math.min(existingItem.quantity + gItem.quantity, existingItem.maxQuantity);

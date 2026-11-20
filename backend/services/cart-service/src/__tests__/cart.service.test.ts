@@ -31,7 +31,13 @@ jest.unstable_mockModule("../clients/discount.client.js", () => ({ quoteCoupon: 
 // ask" answer, which is what every existing test in this file gets — those
 // cases are about cart arithmetic and must keep behaving as they did.
 const stockFor = jest.fn<(...args: any[]) => Promise<number | null>>(async () => null);
-jest.unstable_mockModule('../clients/catalog.client.js', () => ({ availableStockFor: stockFor }));
+const offerDetails = jest.fn<(...args: any[]) => Promise<any>>(async () => null);
+const stockForOffer = jest.fn<(...args: any[]) => Promise<number | null>>(async () => null);
+jest.unstable_mockModule('../clients/catalog.client.js', () => ({
+  availableStockFor: stockFor,
+  fetchOfferDetails: offerDetails,
+  availableStockForOffer: stockForOffer,
+}));
 
 type CartModule = typeof import('../services/cart.service.js');
 let CartService: CartModule['CartService'];

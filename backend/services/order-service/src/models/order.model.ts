@@ -44,6 +44,9 @@ export interface OrderItem {
   id: string;
   productId: string;
   variantId?: string;
+  offerId?: string;
+  sellerSku?: string;
+  condition?: string;
   sellerId: string;
   vendorId?: string;
   productName: string;

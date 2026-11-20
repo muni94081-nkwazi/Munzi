@@ -70,13 +70,10 @@ export async function addItem(req: Request, res: Response): Promise<void> {
     const cart = await cartService.addItem(userId, input);
     res.status(201).json({ success: true, data: cart });
   } catch (err) {
-    // A quantity above what the line allows is the caller's error, not a
-    // server fault — and it is refused rather than silently clamped.
-    if (err instanceof CartQuantityError) {
-      res.status(err.status).json({ success: false, message: err.message });
+    if (typeof (err as any)?.status === 'number') {
+      res.status((err as any).status).json({ success: false, message: (err as Error).message });
       return;
     }
-    // Validation already passed in middleware, so any other throw here is ours.
     res.status(500).json({ success: false, message: (err as Error).message });
   }
 }
@@ -88,13 +85,10 @@ export async function updateItem(req: Request, res: Response): Promise<void> {
     const cart = await cartService.updateItemQuantity(userId, req.params.itemId, input.quantity);
     res.json({ success: true, data: cart });
   } catch (err) {
-    // A quantity above what the line allows is the caller's error, not a
-    // server fault — and it is refused rather than silently clamped.
-    if (err instanceof CartQuantityError) {
-      res.status(err.status).json({ success: false, message: err.message });
+    if (typeof (err as any)?.status === 'number') {
+      res.status((err as any).status).json({ success: false, message: (err as Error).message });
       return;
     }
-    // Validation already passed in middleware, so any other throw here is ours.
     res.status(500).json({ success: false, message: (err as Error).message });
   }
 }

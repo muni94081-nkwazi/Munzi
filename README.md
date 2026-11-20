@@ -62,7 +62,7 @@ The monorepo contains:
 
 ## 2. Project Objectives
 
-- Provide Ugandan consumers with a trusted, locally-focused marketplace for phones, fashion, home goods, and groceries.
+- Provide Ugandan consumers with a trusted, locally-focused marketplace for phones, fashion, home goods, and groceries. 
 - Enable individual and business sellers to list products, manage inventory, and receive payouts through local payment channels.
 - Build a scalable microservices platform that can serve Uganda and expand regionally.
 - Integrate natively with MTN Mobile Money and Airtel Money — the dominant payment methods in Uganda.

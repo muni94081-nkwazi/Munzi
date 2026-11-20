@@ -14,10 +14,14 @@ import { orderRepository } from '../repositories/order.repository.js';
 import type { IOrderRepository, AdminOrderFilters, AdminOrderStats } from '../repositories/order.repository.js';
 import {
   fetchVariant,
+  fetchOffer,
   reserveStock,
+  reserveOfferStock,
   releaseStock,
+  releaseOfferStock,
   restoreStock,
   type CatalogVariant,
+  type CatalogOffer,
 } from '../clients/catalog.client.js';
 import { bookDeliveryJob, BOOK_JOB_AT_STATUS } from '../clients/fulfillment.client.js';
 import { logger } from '../utils/logger.js';
@@ -127,7 +131,16 @@ export interface OrderLineRequest {
    * callers naturally send it.
    */
   productId?: string;
-  variantId:  string;
+  variantId?:  string;
+  /**
+   * When present, the line is priced from the offer rather than from the
+   * variant. The offer carries its own seller, SKU, price, condition and MOQ.
+   */
+  offerId?:   string;
+  /** Pass-through from checkout saga for display on the order. */
+  sellerSku?:   string;
+  condition?:   string;
+  sellerId?:    string;
   quantity:   number;
   /**
    * Set only by checkout-service's saga, which has already taken a TTL hold on
@@ -200,10 +213,14 @@ function sanitizeLine(raw: unknown): OrderLineRequest {
 
   const productId = typeof line.productId === 'string' ? line.productId : '';
   const variantId = typeof line.variantId === 'string' ? line.variantId : '';
+  const offerId   = typeof line.offerId === 'string' ? line.offerId : '';
+  const sellerSku = typeof line.sellerSku === 'string' ? line.sellerSku : undefined;
+  const condition = typeof line.condition === 'string' ? line.condition : undefined;
+  const sellerId  = typeof line.sellerId === 'string' ? line.sellerId : undefined;
   const quantity  = Number(line.quantity);
 
-  if (!variantId) {
-    throw new InvalidOrderError('Every order line must identify a product variant.');
+  if (!variantId && !offerId) {
+    throw new InvalidOrderError('Every order line must identify a product variant or an offer.');
   }
   if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) {
     throw new InvalidOrderError('Each line must have a whole quantity between 1 and 1000.');
@@ -211,7 +228,11 @@ function sanitizeLine(raw: unknown): OrderLineRequest {
 
   return {
     productId,
-    variantId,
+    variantId: variantId || undefined,
+    offerId:   offerId || undefined,
+    sellerSku,
+    condition,
+    sellerId,
     quantity,
     ...(typeof line.reservationId === 'string' && line.reservationId
       ? { reservationId: line.reservationId }
@@ -265,57 +286,115 @@ export async function create(
     throw new InvalidOrderError('A delivery address, city and phone number are required.');
   }
 
-  // Collapse duplicate lines for the same variant so two entries cannot each
-  // reserve separately and slip past the per-line stock check.
-  const byVariant = new Map<string, OrderLineRequest>();
+  // Collapse duplicate lines for the same offer or variant so two entries
+  // cannot each reserve separately and slip past the per-line stock check.
+  // Key by offerId when present; otherwise by variantId + sellerId.
+  const lineKey = (l: OrderLineRequest) =>
+    l.offerId ? `offer:${l.offerId}` : `variant:${l.variantId ?? ''}`;
+
+  const byKey = new Map<string, OrderLineRequest>();
   for (const line of requested) {
-    const existing = byVariant.get(line.variantId);
+    const key = lineKey(line);
+    const existing = byKey.get(key);
     if (existing) {
       existing.quantity += line.quantity;
       existing.reservationId ??= line.reservationId;
     } else {
-      byVariant.set(line.variantId, { ...line });
+      byKey.set(key, { ...line });
     }
   }
 
   // Sorted so every concurrent order takes inventory row locks in the same
   // order — two carts holding {A,B} and {B,A} would otherwise deadlock.
-  const lines = [...byVariant.values()].sort((a, b) => a.variantId.localeCompare(b.variantId));
+  const lines = [...byKey.values()].sort((a, b) => lineKey(a).localeCompare(lineKey(b)));
 
   // ── 2. Price every line from the catalogue ──────────────────────────────
-  const priced: Array<{ line: OrderLineRequest; variant: CatalogVariant }> = [];
+  interface PricedEntry {
+    line:     OrderLineRequest;
+    variant?: CatalogVariant;
+    offer?:   CatalogOffer;
+    sellerId: string;
+    productName: string;
+    productSku:  string;
+    productImageUrl: string | null;
+    unitPrice: number;
+    weightKg?: number | null;
+  }
+
+  const priced: PricedEntry[] = [];
   for (const line of lines) {
-    const variant = await fetchVariant(line.variantId, input.userId);
-    priced.push({ line, variant });
+    if (line.offerId) {
+      const offer = await fetchOffer(line.offerId, line.quantity, input.userId);
+      priced.push({
+        line,
+        offer,
+        sellerId:        offer.sellerId,
+        productName:     offer.productName,
+        productSku:      offer.sellerSku || offer.productSku,
+        productImageUrl: offer.productImageUrl,
+        unitPrice:       offer.price,
+        weightKg:        offer.weightKg,
+      });
+    } else {
+      const variant = await fetchVariant(line.variantId!, input.userId);
+      priced.push({
+        line,
+        variant,
+        sellerId:        variant.sellerId || 'muni-store',
+        productName:     variant.productName,
+        productSku:      variant.sku,
+        productImageUrl: variant.images?.[0] ?? null,
+        unitPrice:       variant.price,
+        weightKg:        variant.weightKg,
+      });
+    }
   }
 
   // ── 3. Hold stock before anything is written ────────────────────────────
   // Lines that arrive with a reservationId were already held by the caller
   // (checkout-service's saga); the rest are held here. Anything we take is
   // released if a later line fails, so a rejected order leaves no stock stuck.
-  const takenHere: Array<{ variantId: string; reservationId: string }> = [];
-  const reservationByVariant = new Map<string, string>();
+  const takenHere: Array<{ variantId?: string; offerId?: string; reservationId: string }> = [];
+  const reservationByKey = new Map<string, string>();
   const sessionId = input.sessionId ?? masterOrderId;
 
   try {
-    for (const { line, variant } of priced) {
-      if (line.reservationId) {
-        reservationByVariant.set(line.variantId, line.reservationId);
+    for (const entry of priced) {
+      const key = lineKey(entry.line);
+      if (entry.line.reservationId) {
+        reservationByKey.set(key, entry.line.reservationId);
         continue;
       }
-      const reservationId = await reserveStock(
-        line.variantId,
-        line.quantity,
-        sessionId,
-        variant.productName,
-        input.userId,
-      );
-      takenHere.push({ variantId: line.variantId, reservationId });
-      reservationByVariant.set(line.variantId, reservationId);
+
+      if (entry.line.offerId) {
+        const reservationId = await reserveOfferStock(
+          entry.line.offerId,
+          entry.line.quantity,
+          sessionId,
+          entry.productName,
+          input.userId,
+        );
+        takenHere.push({ offerId: entry.line.offerId, reservationId });
+        reservationByKey.set(key, reservationId);
+      } else {
+        const reservationId = await reserveStock(
+          entry.line.variantId!,
+          entry.line.quantity,
+          sessionId,
+          entry.productName,
+          input.userId,
+        );
+        takenHere.push({ variantId: entry.line.variantId, reservationId });
+        reservationByKey.set(key, reservationId);
+      }
     }
   } catch (err) {
     await Promise.all(
-      takenHere.map((held) => releaseStock(held.variantId, held.reservationId, input.userId)),
+      takenHere.map((held) =>
+        held.offerId
+          ? releaseOfferStock(held.offerId, held.reservationId, input.userId)
+          : releaseStock(held.variantId!, held.reservationId, input.userId),
+      ),
     );
     throw err;
   }
@@ -325,9 +404,9 @@ export async function create(
   const masterOrderNumber = await repo.nextOrderNumber();
 
   // ── 4. Group by the catalogue's seller, not the caller's ────────────────
-  const itemsBySeller = new Map<string, Array<{ line: OrderLineRequest; variant: CatalogVariant }>>();
+  const itemsBySeller = new Map<string, PricedEntry[]>();
   for (const entry of priced) {
-    const sellerId = entry.variant.sellerId || 'muni-store';
+    const sellerId = entry.sellerId;
     if (!itemsBySeller.has(sellerId)) {
       itemsBySeller.set(sellerId, []);
     }

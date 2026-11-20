@@ -11,6 +11,7 @@ import * as categoryController from './controllers/category.controller.js';
 import * as categoryAttributeController from './controllers/category-attribute.controller.js';
 import * as variantController  from './controllers/variant.controller.js';
 import * as importController   from './controllers/import.controller.js';
+import * as offerController    from './controllers/offer.controller.js';
 
 // ── Shared ────────────────────────────────────────────────────────────────────
 import { connectCache, disconnectCache, isCacheReady } from '../../../shared/cache/redis.js';
@@ -119,6 +120,11 @@ app.post  ('/api/v1/products/:id/variants',              requireSeller, variantC
 app.put   ('/api/v1/products/:id/variants/:variantId',   requireSeller, variantController.updateVariant);
 app.delete('/api/v1/products/:id/variants/:variantId',   requireSeller, variantController.deleteVariant);
 
+// ── Public ProductOffer Routes ────────────────────────────────────────────────
+app.get   ('/api/v1/products/:id/offers',                     offerController.publicListForProduct);
+app.get   ('/api/v1/products/:id/variants/:variantId/offers', offerController.publicListForVariant);
+app.get   ('/api/v1/offers/:id',                              optionalAuth, offerController.publicGet);
+
 // ── Review Routes ─────────────────────────────────────────────────────────────
 
 app.get ('/api/v1/products/:id/reviews',  reviewController.list);
@@ -163,6 +169,13 @@ app.put   ('/api/v1/seller/products/:id',  requireSeller, productController.upda
 app.put   ('/api/v1/seller/products/:id/specifications', requireSeller, productController.setSpecifications);
 app.delete('/api/v1/seller/products/:id',  requireSeller, productController.remove);
 
+// ── Seller Offer Routes (/api/v1/seller/offers) ───────────────────────────────
+app.post  ('/api/v1/seller/offers',     requireSeller, offerController.create);
+app.get   ('/api/v1/seller/offers',     requireSeller, offerController.sellerList);
+app.get   ('/api/v1/seller/offers/:id', requireSeller, offerController.sellerGet);
+app.put   ('/api/v1/seller/offers/:id', requireSeller, offerController.update);
+app.delete('/api/v1/seller/offers/:id', requireSeller, offerController.remove);
+
 // ── Admin Moderation Routes (/api/v1/admin/products) ──────────────────────────
 // Gated by requireRole('ROLE_ADMIN', 'ROLE_SUPER_ADMIN') at the gateway.
 // '/counts' precedes '/:id' for the same reason as above.
@@ -171,6 +184,10 @@ app.get  ('/api/v1/admin/products',                productController.adminList);
 app.get  ('/api/v1/admin/products/counts',          productController.adminCounts);
 app.get  ('/api/v1/admin/products/:id',             productController.adminGet);
 app.patch('/api/v1/admin/products/:id/moderate',    productController.moderate);
+
+// ── Admin Offer Moderation Routes (/api/v1/admin/offers) ──────────────────────
+app.get  ('/api/v1/admin/offers',                  requireAdmin, offerController.adminList);
+app.patch('/api/v1/admin/offers/:id/moderate',     requireAdmin, offerController.adminModerate);
 
 // ── Admin: rebuild the search index ───────────────────────────────────────────
 //

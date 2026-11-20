@@ -93,7 +93,8 @@ export const CheckoutSessionSchema = z.object({
    * its TTL lapsed.
    */
   reservations: z.array(z.object({
-    variantId:     z.string(),
+    variantId:     z.string().optional(),
+    offerId:       z.string().optional(),
     reservationId: z.string(),
   })).default([]),
   couponCode: z.string().optional(),

@@ -13,11 +13,14 @@ export const CreateCategorySchema = z.object({
   commissionFeePercent: z.number().min(0).max(100).default(0),
 });
 
-export const UpdateCategorySchema = CreateCategorySchema.partial();
+export const UpdateCategorySchema = CreateCategorySchema.partial().extend({
+  parentId: z.string().nullable().optional(),
+});
 // z.input, not z.infer: fields with `.default()` are optional on the way IN
 // and guaranteed on the way OUT. Using the output type here made every
 // defaulted field mandatory for callers, which is the opposite of the intent.
 export type CreateCategoryInput = z.input<typeof CreateCategorySchema>;
+export type UpdateCategoryInput = z.input<typeof UpdateCategorySchema>;
 
 /**
  * Fetch the COMPLETE category tree in a single recursive CTE query.
@@ -104,11 +107,12 @@ export async function getCategoryById(id: string) {
   // Build breadcrumb from path
   const breadcrumb = await prisma.$queryRaw<Array<{ id: string; name: string; slug: string }>>`
     WITH RECURSIVE ancestors AS (
-      SELECT id, name, slug, "parentId", 0 AS depth
+      SELECT id, name, slug, "parentId", 0 AS depth, ARRAY[id]::text[] AS visited
       FROM "Category" WHERE id = ${id}
       UNION ALL
-      SELECT c.id, c.name, c.slug, c."parentId", a.depth + 1
+      SELECT c.id, c.name, c.slug, c."parentId", a.depth + 1, a.visited || c.id
       FROM "Category" c JOIN ancestors a ON c.id = a."parentId"
+      WHERE NOT (c.id = ANY(a.visited)) AND a.depth < 20
     )
     SELECT id, name, slug FROM ancestors ORDER BY depth DESC;
   `;
@@ -119,16 +123,19 @@ export async function getCategoryById(id: string) {
 /**
  * Get all descendant category IDs (for filtering products by parent category).
  * Returns flat array of IDs including the given category itself.
- * Uses bounded cycle-safe recursive CTE.
+ * Uses bounded cycle-safe recursive CTE with visited array tracking.
  */
 export async function getCategoryDescendantIds(categoryId: string, client: any = prisma): Promise<string[]> {
   const rows = await client.$queryRaw<Array<{ id: string }>>`
     WITH RECURSIVE descendants AS (
-      SELECT id, 0 AS depth FROM "Category" WHERE id = ${categoryId}
+      SELECT id, 0 AS depth, ARRAY[id]::text[] AS visited
+      FROM "Category"
+      WHERE id = ${categoryId}
       UNION ALL
-      SELECT c.id, d.depth + 1 FROM "Category" c
+      SELECT c.id, d.depth + 1, d.visited || c.id
+      FROM "Category" c
       JOIN descendants d ON c."parentId" = d.id
-      WHERE d.depth < 20
+      WHERE NOT (c.id = ANY(d.visited)) AND d.depth < 20
     )
     SELECT id FROM descendants;
   `;
@@ -172,14 +179,22 @@ export async function updateCategory(id: string, input: z.infer<typeof UpdateCat
     }
 
     // 2. Deterministic Row-Level Locking across target and new parent to prevent race conditions
-    if (validated.parentId && typeof tx.$queryRaw === 'function') {
-      const lockIds = [id, validated.parentId].sort();
-      await tx.$queryRaw`
-        SELECT id FROM "Category"
-        WHERE id IN (${lockIds[0]}, ${lockIds[1]})
-        ORDER BY id ASC
-        FOR UPDATE;
-      `.catch(() => { /* non-fatal on sqlite / test mocks */ });
+    if (typeof tx.$queryRaw === 'function') {
+      if (typeof validated.parentId === 'string' && validated.parentId.length > 0) {
+        const lockIds = [id, validated.parentId].sort();
+        await tx.$queryRaw`
+          SELECT id FROM "Category"
+          WHERE id IN (${lockIds[0]}, ${lockIds[1]})
+          ORDER BY id ASC
+          FOR UPDATE;
+        `.catch(() => { /* non-fatal on sqlite / test mocks */ });
+      } else {
+        await tx.$queryRaw`
+          SELECT id FROM "Category"
+          WHERE id = ${id}
+          FOR UPDATE;
+        `.catch(() => { /* non-fatal on sqlite / test mocks */ });
+      }
     }
 
     const existing = await tx.category.findUniqueOrThrow({ where: { id } });
