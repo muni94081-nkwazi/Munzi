@@ -5,6 +5,7 @@ import type { IOrderRepository } from '../repositories/order.repository.js';
 import type { Order } from '../models/order.model.js';
 import {
   deductStock,
+  deductOfferStock,
   refundPayment,
   StockSettlementError,
 } from '../clients/catalog.client.js';
@@ -31,7 +32,7 @@ export interface SettlementOutcome {
   status: 'settled' | 'skipped' | 'failed';
   reason?: string;
   /** Lines that were successfully deducted before any failure. */
-  deducted: Array<{ variantId: string; quantity: number }>;
+  deducted: Array<{ variantId?: string; offerId?: string; quantity: number }>;
   refunded: boolean;
 }
 
@@ -77,19 +78,22 @@ export async function settlePaidOrder(
     return { orderId, status: 'skipped', reason: 'already_settled', deducted: [], refunded: false };
   }
 
-  const deducted: Array<{ variantId: string; quantity: number }> = [];
+  const deducted: Array<{ variantId?: string; offerId?: string; quantity: number }> = [];
 
   try {
     for (const item of order.items) {
-      if (!item.variantId) {
+      if (item.offerId) {
+        await deductOfferStock(item.offerId, item.quantity, item.reservationId, order.userId);
+        deducted.push({ offerId: item.offerId, quantity: item.quantity });
+      } else if (item.variantId) {
+        await deductStock(item.variantId, item.quantity, item.reservationId, order.userId);
+        deducted.push({ variantId: item.variantId, quantity: item.quantity });
+      } else {
         // Nothing addressable to deduct against. Stock lives on the variant
         // row, so a line without one cannot be settled — surface it rather
         // than pretend the order is fully accounted for.
-        throw new StockSettlementError(item.productId, 'line has no variantId');
+        throw new StockSettlementError(item.productId, 'line has no variantId or offerId');
       }
-
-      await deductStock(item.variantId, item.quantity, item.reservationId, order.userId);
-      deducted.push({ variantId: item.variantId, quantity: item.quantity });
     }
   } catch (err) {
     const detail = (err as Error).message;

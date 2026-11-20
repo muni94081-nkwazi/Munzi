@@ -99,6 +99,19 @@ const mockBookDeliveryJob = jest.fn(async (order: any, subOrder: any) => {
   return true;
 });
 
+const mockFetchOffer = jest.fn(async (_offerId: string, _quantity: number) => {
+  throw new ItemUnavailableError(_offerId);
+});
+
+const mockReserveOfferStock = jest.fn(
+  async (offerId: string, quantity: number, _sessionId: string, _reference: string) => {
+    return `res-offer-${offerId}`;
+  },
+);
+
+const mockReleaseOfferStock = jest.fn(async (_offerId: string, _reservationId: string) => {});
+const mockDeductOfferStock = jest.fn(async () => {});
+
 jest.unstable_mockModule('../clients/fulfillment.client.js', () => ({
   bookDeliveryJob: mockBookDeliveryJob,
   BOOK_JOB_AT_STATUS: 'processing',
@@ -106,13 +119,18 @@ jest.unstable_mockModule('../clients/fulfillment.client.js', () => ({
 }));
 
 jest.unstable_mockModule('../clients/catalog.client.js', () => ({
-  fetchVariant:  mockFetchVariant,
-  reserveStock:  mockReserveStock,
-  releaseStock:  mockReleaseStock,
-  restoreStock:  mockRestoreStock,
+  fetchVariant:         mockFetchVariant,
+  fetchOffer:           mockFetchOffer,
+  reserveStock:         mockReserveStock,
+  reserveOfferStock:    mockReserveOfferStock,
+  releaseStock:         mockReleaseStock,
+  releaseOfferStock:    mockReleaseOfferStock,
+  restoreStock:         mockRestoreStock,
+  deductOfferStock:     mockDeductOfferStock,
   ItemUnavailableError,
   OutOfStockError,
   CatalogUnavailableError: class extends Error {},
+  StockSettlementError: class extends Error {},
 }));
 
 // Dynamic import AFTER mocks — required for ESM Jest

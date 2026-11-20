@@ -53,12 +53,24 @@ const mockRefundPayment = jest.fn(async (reference: string, reason: string) => {
   if (refundShouldFail) throw new Error('payment-service unreachable');
 });
 
+const mockDeductOfferStock = jest.fn(
+  async (offerId: string, quantity: number, reservationId?: string) => {
+    deductCalls.push({ variantId: offerId, quantity, reservationId });
+    if (deductFails.has(offerId)) {
+      throw new StockSettlementError(offerId, 'reservation expired');
+    }
+  },
+);
+
 jest.unstable_mockModule('../clients/catalog.client.js', () => ({
   deductStock: mockDeductStock,
+  deductOfferStock: mockDeductOfferStock,
   refundPayment: mockRefundPayment,
   StockSettlementError,
-  fetchVariant: jest.fn(), fetchProduct: jest.fn(),
+  fetchVariant: jest.fn(), fetchProduct: jest.fn(), fetchOffer: jest.fn(),
   reserveStock: jest.fn(), releaseStock: jest.fn(),
+  reserveOfferStock: jest.fn(), releaseOfferStock: jest.fn(),
+  restoreStock: jest.fn(),
   ItemUnavailableError: class extends Error {},
   OutOfStockError: class extends Error {},
   CatalogUnavailableError: class extends Error {},

@@ -426,24 +426,28 @@ export async function create(
     const subOrderId = randomUUID();
     const subOrderNumber = generateSubOrderNumber(masterOrderNumber, sellerIndex++);
 
-    // Every field here comes from `variant` — the catalogue's answer — except
+    // Every field here comes from the catalogue's answer — except
     // `quantity`, the one thing the customer legitimately chooses.
-    const subOrderItems: OrderItem[] = sellerItems.map(({ line, variant }) => {
+    const subOrderItems: OrderItem[] = sellerItems.map((entry) => {
+      const key = lineKey(entry.line);
       const orderItem: OrderItem = {
         id:              randomUUID(),
-        productId:       variant.productId,
-        variantId:       variant.id,
+        productId:       entry.offer?.productId ?? entry.variant?.productId ?? entry.line.productId ?? '',
+        variantId:       entry.offer?.variantId ?? entry.variant?.id,
+        offerId:         entry.line.offerId,
+        sellerSku:       entry.offer?.sellerSku ?? entry.line.sellerSku,
+        condition:       entry.offer?.condition ?? entry.line.condition,
         sellerId:        sellerId,
         vendorId:        sellerId,
-        productName:     variant.productName,
-        productSku:      variant.sku,
-        productImageUrl: variant.images?.[0] ?? null,
-        unitPrice:       round2(variant.price),
-        quantity:        line.quantity,
-        lineTotal:       round2(variant.price * line.quantity),
-        weightKg:        variant.weightKg ?? undefined,
+        productName:     entry.productName,
+        productSku:      entry.productSku,
+        productImageUrl: entry.productImageUrl,
+        unitPrice:       round2(entry.unitPrice),
+        quantity:        entry.line.quantity,
+        lineTotal:       round2(entry.unitPrice * entry.line.quantity),
+        weightKg:        entry.weightKg ?? undefined,
         // Carried so settlement can deduct exactly this hold later.
-        reservationId:   reservationByVariant.get(variant.id),
+        reservationId:   reservationByKey.get(key),
       };
       allOrderItems.push(orderItem);
       return orderItem;
@@ -611,7 +615,11 @@ export async function create(
       const winner = await repo.findByCheckoutSessionId(input.sessionId);
       if (winner) {
         await Promise.all(
-          takenHere.map((held) => releaseStock(held.variantId, held.reservationId, input.userId)),
+          takenHere.map((held) =>
+            held.offerId
+              ? releaseOfferStock(held.offerId, held.reservationId, input.userId)
+              : releaseStock(held.variantId!, held.reservationId, input.userId),
+          ),
         );
         logger.warn('[order] concurrent create for one checkout session — returning the committed order', {
           detail: { orderId: winner.id, sessionId: input.sessionId },
@@ -621,7 +629,11 @@ export async function create(
     }
 
     await Promise.all(
-      takenHere.map((held) => releaseStock(held.variantId, held.reservationId, input.userId)),
+      takenHere.map((held) =>
+        held.offerId
+          ? releaseOfferStock(held.offerId, held.reservationId, input.userId)
+          : releaseStock(held.variantId!, held.reservationId, input.userId),
+      ),
     );
     throw err;
   }
@@ -663,7 +675,9 @@ export async function create(
         productId:     item.productId,
         variantId:     item.variantId,
         quantity:      item.quantity,
-        reservationId: item.variantId ? reservationByVariant.get(item.variantId) : undefined,
+        reservationId: item.offerId
+          ? reservationByKey.get(`offer:${item.offerId}`)
+          : item.variantId ? reservationByKey.get(`variant:${item.variantId}`) : undefined,
       })),
       subOrders: subOrders.map((so) => ({ subOrderId: so.id, sellerId: so.sellerId, subtotal: so.subtotal })),
       total:     created.totalAmount,
@@ -941,8 +955,8 @@ export async function cancel(
   // one unreachable variant must not strand the rest.
   for (const subOrder of saved.subOrders) {
     for (const item of subOrder.items) {
-      if (!item.variantId) {
-        logger.error('cancelled line names no variant — stock cannot be returned', { detail: {
+      if (!item.variantId && !item.offerId) {
+        logger.error('cancelled line names no variant or offer — stock cannot be returned', { detail: {
           orderId: saved.id, productId: item.productId, quantity: item.quantity,
         } });
         continue;
@@ -950,10 +964,14 @@ export async function cancel(
       // `restoreStock` swallows its own failures, but the cancellation must
       // not depend on it continuing to: the customer's order is already
       // cancelled and their refund already in train.
-      await restoreStock(item.variantId, item.quantity, `order ${saved.id} cancelled`, userId)
+      // For offer-based items we still restore via the variant path since
+      // the underlying stock row is variant-scoped. offer inventory
+      // adjustments are reconciled separately.
+      const targetId = item.variantId || item.offerId!;
+      await restoreStock(targetId, item.quantity, `order ${saved.id} cancelled`, userId)
         .catch((err: unknown) => {
           logger.error('stock NOT returned to the catalogue — needs manual correction', { detail: {
-            orderId: saved.id, variantId: item.variantId, quantity: item.quantity,
+            orderId: saved.id, variantId: item.variantId, offerId: item.offerId, quantity: item.quantity,
             error: (err as Error).message,
           } });
         });
