@@ -30,6 +30,7 @@ const mockPrisma: any = {
   productOffer: {
     create:     jest.fn<(...args: any[]) => any>(),
     update:     jest.fn<(...args: any[]) => any>(),
+    updateMany: jest.fn<(...args: any[]) => any>(),
     delete:     jest.fn<(...args: any[]) => any>(),
     findUnique: jest.fn<(...args: any[]) => any>(),
     findFirst:  jest.fn<(...args: any[]) => any>(),
@@ -132,6 +133,8 @@ beforeEach(() => {
   mockPrisma.$transaction.mockImplementation((fn: (tx: any) => any) => fn(mockPrisma));
   mockEligibility.verifySellerEligibility.mockResolvedValue(eligibleSeller);
   mockPrisma.product.update.mockResolvedValue({});
+  mockPrisma.productOffer.findMany.mockResolvedValue([]);
+  mockPrisma.productOffer.updateMany.mockResolvedValue({ count: 0 });
 });
 
 afterEach(() => {
@@ -228,6 +231,7 @@ describe('createOffer — Canonical Product & Variant Integrity', () => {
     });
     mockPrisma.productVariant.findFirst.mockResolvedValueOnce(pendingVariant);
     mockPrisma.productOffer.findFirst.mockResolvedValueOnce(null); // no dupe SKU
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for buybox evaluation
     mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for projections
     mockPrisma.productOffer.create.mockImplementationOnce(async ({ data }: any) => ({ id: 'new-off', ...data }));
 
@@ -245,7 +249,8 @@ describe('createOffer — Canonical Product & Variant Integrity', () => {
   it('forces offer status to OUT_OF_STOCK if initial stock is zero', async () => {
     mockPrisma.productVariant.findFirst.mockResolvedValueOnce(makeVariant());
     mockPrisma.productOffer.findFirst.mockResolvedValueOnce(null);
-    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]);
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for buybox evaluation
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for projections
     mockPrisma.productOffer.create.mockImplementationOnce(async ({ data }: any) => ({ id: 'new-off', ...data }));
 
     const offer = await createOffer('seller-alpha', {
@@ -286,7 +291,8 @@ describe('ProductOffer — Seller SKU Uniqueness', () => {
     mockPrisma.productVariant.findFirst.mockResolvedValueOnce(makeVariant());
     // No conflicting SKU for seller-beta
     mockPrisma.productOffer.findFirst.mockResolvedValueOnce(null);
-    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]);
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for buybox evaluation
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for projections
     mockPrisma.productOffer.create.mockImplementationOnce(async ({ data }: any) => ({ id: 'off-beta', ...data }));
 
     const offer = await createOffer('seller-beta', {
@@ -364,7 +370,8 @@ describe('ProductOffer — Price & Tier Validations', () => {
   it('accepts valid wholesale tiers with strictly increasing quantities and decreasing prices', async () => {
     mockPrisma.productVariant.findFirst.mockResolvedValueOnce(makeVariant());
     mockPrisma.productOffer.findFirst.mockResolvedValueOnce(null);
-    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]);
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for buybox evaluation
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for projections
     mockPrisma.productOffer.create.mockImplementationOnce(async ({ data }: any) => ({ id: 'off-valid', ...data }));
 
     const offer = await createOffer('seller-alpha', {
@@ -407,7 +414,8 @@ describe('updateOffer & deleteOffer — Authorization', () => {
   it('allows an ADMIN to update or delete any offer', async () => {
     mockPrisma.productOffer.findUnique.mockResolvedValueOnce(makeOffer({ sellerId: 'seller-alpha' }));
     mockPrisma.productOffer.update.mockResolvedValueOnce(makeOffer({ price: 3200000 }));
-    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]);
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for buybox evaluation
+    mockPrisma.productOffer.findMany.mockResolvedValueOnce([]); // for projections
 
     const updated = await updateOffer('off-001', 'admin-user', { price: 3200000 }, ['ROLE_ADMIN']);
     expect(updated).toBeDefined();

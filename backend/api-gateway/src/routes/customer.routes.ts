@@ -121,6 +121,7 @@ export function customerRoutes(targets: Record<string, string>): Router {
   // prefix cannot move behind requireAuth. It is the WRITE side that had to go
   // — see pubReadOnly above, and the admin reindex mount in admin.routes.ts.
   pubReadOnly('/search',    targets.product);
+  pubReadOnly('/offers',    targets.product);         // public offer discovery -> product-service
   pub('/recommendations',   targets.recommendation);
   pub('/sellers/register',  targets.auth);            // seller self-registration (public)
   pub('/marketplace',       targets.marketplace);     // public storefront browsing

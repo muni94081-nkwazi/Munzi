@@ -208,8 +208,12 @@ export class CheckoutService {
     if (session.status !== 'PAYMENT_PENDING') return session;
 
     for (const hold of session.reservations ?? []) {
+      const releasePath = hold.offerId
+        ? `${SERVICES.inventory}/api/v1/inventory/offers/${encodeURIComponent(hold.offerId)}/release`
+        : `${SERVICES.inventory}/api/v1/inventory/${encodeURIComponent(hold.variantId ?? '')}/release`;
+
       const res = await call(
-        `${SERVICES.inventory}/api/v1/inventory/${encodeURIComponent(hold.variantId)}/release`,
+        releasePath,
         {
           service: 'inventory-service',
           method:  'POST',
@@ -221,7 +225,7 @@ export class CheckoutService {
       // state either way, so it is logged rather than retried.
       if (!res.ok) {
         logger.warn('[checkout] could not release hold while failing session', {
-          sessionId, variantId: hold.variantId, status: res.status,
+          sessionId, variantId: hold.variantId, offerId: hold.offerId, status: res.status,
         });
       }
     }

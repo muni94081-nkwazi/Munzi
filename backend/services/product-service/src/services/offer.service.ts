@@ -2,6 +2,19 @@ import { prisma } from '../db/prisma.js';
 import { z } from 'zod';
 import { validateWholesaleTiers, type WholesaleTier } from '../../../../shared/types/product.types.js';
 import { verifySellerEligibility } from './seller-eligibility.service.js';
+import {
+  evaluateBuyBoxForVariant,
+  evaluateBuyBoxForProduct,
+  recalculateBuyBoxForSeller,
+  calculateBuyBoxScore,
+} from './buybox.service.js';
+
+export {
+  evaluateBuyBoxForVariant,
+  evaluateBuyBoxForProduct,
+  recalculateBuyBoxForSeller,
+  calculateBuyBoxScore,
+};
 
 // ── Custom Errors ─────────────────────────────────────────────────────────────
 
@@ -273,6 +286,7 @@ export async function createOffer(
       },
     });
 
+    await evaluateBuyBoxForVariant(validated.variantId, tx);
     await refreshProductOfferProjections(validated.productId, tx);
     return created;
   });
@@ -390,6 +404,13 @@ export async function updateOffer(
         status:            targetStatus,
       },
     });
+
+    // Re-evaluate Buy Box if price, stock, condition, or status changed
+    const buyBoxTriggerFields = ['price', 'stock', 'condition', 'status'];
+    const shouldReEvaluate = buyBoxTriggerFields.some((f) => (validated as any)[f] !== undefined);
+    if (shouldReEvaluate) {
+      await evaluateBuyBoxForVariant(existing.variantId, tx);
+    }
 
     await refreshProductOfferProjections(existing.productId, tx);
     return u;
@@ -708,6 +729,7 @@ export async function adminModerateOffer(
       },
     });
 
+    await evaluateBuyBoxForVariant(offer.variantId, tx);
     await refreshProductOfferProjections(offer.productId, tx);
     return res;
   });
@@ -750,6 +772,7 @@ export async function deleteOffer(offerId: string, sellerId: string, actorRoles?
       where: { id: offerId },
     });
 
+    await evaluateBuyBoxForVariant(offer.variantId, tx);
     await refreshProductOfferProjections(offer.productId, tx);
   });
 
