@@ -28,6 +28,34 @@ export interface BuyBoxWinnerResult {
   eligibleCount: number;
 }
 
+// ── Public Sanitized Types ─────────────────────────────────────────────────────
+
+export interface PublicBuyBoxOffer {
+  id: string;
+  productId: string;
+  variantId: string;
+  sellerId: string;
+  price: number;
+  compareAtPrice: number | null;
+  currency: string;
+  condition: string;
+  conditionNote: string | null;
+  moq: number;
+  wholesaleTiers: any;
+  inStock: boolean;
+  isBuyBoxWinner: boolean;
+  createdAt: Date | string;
+}
+
+export interface PublicBuyBoxResult {
+  variantId: string;
+  productId: string;
+  winningOfferId: string | null;
+  hasWinner: boolean;
+  inStock: boolean;
+  winner: PublicBuyBoxOffer | null;
+}
+
 // ── Condition Weighting ───────────────────────────────────────────────────────
 
 export const CONDITION_WEIGHTS: Record<string, number> = {
@@ -48,9 +76,25 @@ export const CONDITION_WEIGHTS: Record<string, number> = {
  *
  * Scoring factors:
  * 1. Landed price (0 to 600 pts): (minPrice / offerPrice) * 600
+ *    [ROADMAP NOTE]: Shipping estimation is not yet integrated. Full landed cost
+ *    (unit price + estimated standard shipping to customer destination) will be
+ *    incorporated once shipping-service rate APIs are exposed.
  * 2. In-stock availability (0 to 200 pts): Math.min((stock - reserved) / 10, 1.0) * 200
  * 3. Condition priority (0 to 150 pts): NEW = 150, USED_LIKE_NEW = 100, etc.
  * 4. Seller trust & verification (0 to 50 pts): Verified merchant (+30), Standing GOOD (+20)
+ *    [ROADMAP NOTE]: Quantitative customer ratings (1-5 stars from review-service),
+ *    historical seller cancellation rates, and order defect rates (ODR) are planned
+ *    for post-Gate 3B integration.
+ * [ROADMAP NOTE]: Fulfillment speed (delivery SLA / dispatch window) is not yet
+ * factored into scoring.
+ *
+ * [GATE 3G MIGRATION NOTE]: The PostgreSQL partial unique index:
+ *   CREATE UNIQUE INDEX "idx_product_offer_single_buybox_winner"
+ *   ON "ProductOffer" ("variantId")
+ *   WHERE "isBuyBoxWinner" = true;
+ * is documented for formal application during Gate 3G (Stage 2 & 3 Migration & Backfill).
+ * In Gate 3B.1, single-winner integrity is strictly enforced at runtime via variant-keyed
+ * mutex serialization, transactional execution, and PostgreSQL row/advisory locking.
  */
 export function calculateBuyBoxScore(
   offer: {
@@ -116,26 +160,136 @@ export function calculateBuyBoxScore(
   };
 }
 
+// ── Public Sanitization Helpers ────────────────────────────────────────────────
+
+/**
+ * Convert an internal candidate offer to a public shopper view.
+ * Removes raw warehouse stock, cart reservations, and internal seller SKU.
+ */
+export function toPublicBuyBoxOffer(offer: any): PublicBuyBoxOffer | null {
+  if (!offer) return null;
+  const sellable = (Number(offer.stock) - Number(offer.reserved ?? 0)) > 0;
+  return {
+    id:             offer.id,
+    productId:      offer.productId,
+    variantId:      offer.variantId,
+    sellerId:       offer.sellerId,
+    price:          Number(offer.price),
+    compareAtPrice: offer.compareAtPrice !== null && offer.compareAtPrice !== undefined ? Number(offer.compareAtPrice) : null,
+    currency:       offer.currency || 'UGX',
+    condition:      offer.condition,
+    conditionNote:  offer.conditionNote ?? null,
+    moq:            offer.moq ?? 1,
+    wholesaleTiers: offer.wholesaleTiers ?? null,
+    inStock:        sellable,
+    isBuyBoxWinner: Boolean(offer.isBuyBoxWinner),
+    createdAt:      offer.createdAt,
+  };
+}
+
+/**
+ * Convert an internal evaluation result to a public response.
+ * Completely strips score, breakdown, sellerTrustScore, and evaluation counts.
+ */
+export function toPublicBuyBoxResult(result: BuyBoxWinnerResult | null): PublicBuyBoxResult | null {
+  if (!result) return null;
+  const publicOffer = toPublicBuyBoxOffer(result.winner);
+  return {
+    variantId:      result.variantId,
+    productId:      result.productId,
+    winningOfferId: result.winningOfferId,
+    hasWinner:      Boolean(result.winningOfferId),
+    inStock:        Boolean(publicOffer?.inStock),
+    winner:         publicOffer,
+  };
+}
+
+// ── Concurrency & Serialization Controls ──────────────────────────────────────
+
+// In-process variant lock queue to serialize concurrent evaluations for the same variant
+const variantLocks = new Map<string, Promise<void>>();
+
+export async function acquireVariantLock(variantId: string): Promise<() => void> {
+  while (variantLocks.has(variantId)) {
+    try {
+      await variantLocks.get(variantId);
+    } catch {
+      // Ignore errors from preceding lock holder
+    }
+  }
+
+  let releaseLock!: () => void;
+  const lockPromise = new Promise<void>((resolve) => {
+    releaseLock = () => {
+      variantLocks.delete(variantId);
+      resolve();
+    };
+  });
+
+  variantLocks.set(variantId, lockPromise);
+  return releaseLock;
+}
+
+export async function runWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      attempt++;
+      const isTransient =
+        err?.code === '40P01' || // PostgreSQL deadlock_detected
+        err?.code === '40001' || // PostgreSQL serialization_failure
+        err?.code === 'P2034' || // Prisma transaction conflict
+        err?.message?.includes('deadlock') ||
+        err?.message?.includes('could not serialize');
+
+      if (attempt < maxRetries && isTransient) {
+        const jitter = Math.random() * 50;
+        const delay = Math.min(50 * Math.pow(2, attempt) + jitter, 400);
+        await new Promise((res) => setTimeout(res, delay));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // ── Buy Box Evaluation Methods ────────────────────────────────────────────────
 
 /**
- * Evaluates and awards the Buy Box for a specific canonical product variant.
- *
- * Algorithm:
- * 1. Fetches all offers for the given variant.
- * 2. Filters to ACTIVE offers with sellable stock > 0.
- * 3. Verifies seller eligibility fail-closed (disqualifying ineligible/suspended sellers).
- * 4. Finds minimum price among eligible offers.
- * 5. Scores each candidate across price, stock, condition, and seller standing.
- * 6. Promotes top-scoring offer to isBuyBoxWinner: true and demotes all others to false.
+ * Internal core execution of Buy Box evaluation within an isolated transaction.
  */
-export async function evaluateBuyBoxForVariant(
+async function executeEvaluation(
   variantId: string,
-  client: any = prisma,
+  tx: any,
 ): Promise<BuyBoxWinnerResult | null> {
-  if (!variantId) return null;
+  // 1. PostgreSQL advisory xact lock and row-level lock
+  if (typeof tx.$executeRaw === 'function') {
+    // Namespace 0x4D554E49 ('MUNI') = 1297436233
+    try {
+      await tx.$executeRaw`
+        SELECT pg_advisory_xact_lock(1297436233, hashtext(${variantId}))
+      `;
+    } catch {
+      // non-fatal on sqlite / test mocks
+    }
+  }
 
-  const offers = await client.productOffer.findMany({
+  if (typeof tx.$queryRaw === 'function') {
+    try {
+      await tx.$queryRaw`
+        SELECT id FROM "ProductVariant"
+        WHERE id = ${variantId}
+        FOR UPDATE
+      `;
+    } catch {
+      // non-fatal on sqlite / test mocks
+    }
+  }
+
+  // 2. Fetch all candidate offers for this variant
+  const offers = await tx.productOffer.findMany({
     where: { variantId },
     select: {
       id:             true,
@@ -160,14 +314,14 @@ export async function evaluateBuyBoxForVariant(
 
   const productId = offers[0].productId;
 
-  // 1. Initial filter: ACTIVE and sellable stock > 0
+  // 3. Filter to ACTIVE offers with sellable stock > 0
   const activeStockedOffers = offers.filter(
     (o: any) => o.status === 'ACTIVE' && (o.stock - o.reserved) > 0,
   );
 
   if (activeStockedOffers.length === 0) {
     // Demote any previously assigned winner
-    await client.productOffer.updateMany({
+    await tx.productOffer.updateMany({
       where: {
         variantId,
         isBuyBoxWinner: true,
@@ -186,7 +340,7 @@ export async function evaluateBuyBoxForVariant(
     };
   }
 
-  // 2. Verify Seller Eligibility for all candidates (cached per seller)
+  // 4. Verify Seller Eligibility for all candidates (cached per seller)
   const sellerEligibilityCache = new Map<string, SellerEligibilityResult>();
   const eligibleCandidates: Array<{ offer: any; eligibility: SellerEligibilityResult }> = [];
 
@@ -204,7 +358,7 @@ export async function evaluateBuyBoxForVariant(
 
   if (eligibleCandidates.length === 0) {
     // All candidates failed eligibility: demote all
-    await client.productOffer.updateMany({
+    await tx.productOffer.updateMany({
       where: {
         variantId,
         isBuyBoxWinner: true,
@@ -223,10 +377,10 @@ export async function evaluateBuyBoxForVariant(
     };
   }
 
-  // 3. Find minimum price among eligible candidates
+  // 5. Find minimum price among eligible candidates
   const minPrice = Math.min(...eligibleCandidates.map((c) => Number(c.offer.price)));
 
-  // 4. Score each candidate
+  // 6. Score each candidate
   const scoredCandidates: BuyBoxCandidate[] = eligibleCandidates.map(({ offer, eligibility }) => {
     const { score, breakdown } = calculateBuyBoxScore(offer, minPrice, eligibility);
     return {
@@ -236,7 +390,7 @@ export async function evaluateBuyBoxForVariant(
     };
   });
 
-  // 5. Rank candidates: Score DESC, createdAt ASC (earlier listed wins tie), id ASC
+  // 7. Rank candidates: Score DESC, createdAt ASC (earlier listed wins tie), id ASC
   scoredCandidates.sort((a, b) => {
     if (b.score !== a.score) {
       return b.score - a.score;
@@ -251,9 +405,9 @@ export async function evaluateBuyBoxForVariant(
 
   const winner = scoredCandidates[0];
 
-  // 6. Update database atomically
+  // 8. Update database atomically:
   // Demote previous winners that are not the current winner
-  await client.productOffer.updateMany({
+  await tx.productOffer.updateMany({
     where: {
       variantId,
       isBuyBoxWinner: true,
@@ -264,7 +418,7 @@ export async function evaluateBuyBoxForVariant(
 
   // Promote current winner if not already flagged
   if (!winner.offer.isBuyBoxWinner) {
-    await client.productOffer.update({
+    await tx.productOffer.update({
       where: { id: winner.offer.id },
       data: { isBuyBoxWinner: true },
     });
@@ -280,6 +434,42 @@ export async function evaluateBuyBoxForVariant(
     evaluatedCount: offers.length,
     eligibleCount: eligibleCandidates.length,
   };
+}
+
+/**
+ * Evaluates and awards the Buy Box for a specific canonical product variant.
+ * Enforces in-process mutex locking and transactional isolation.
+ */
+export async function evaluateBuyBoxForVariant(
+  variantId: string,
+  client: any = prisma,
+): Promise<BuyBoxWinnerResult | null> {
+  if (!variantId) return null;
+
+  const releaseLock = await acquireVariantLock(variantId);
+
+  try {
+    const isInsideTransaction = client !== prisma && typeof client.$transaction !== 'function';
+
+    if (isInsideTransaction) {
+      return await executeEvaluation(variantId, client);
+    }
+
+    const runner = typeof (client as any).$transaction === 'function'
+      ? (fn: (tx: any) => Promise<any>) => (client as any).$transaction(fn, {
+          maxWait: 5000,
+          timeout: 10000,
+        })
+      : (fn: (tx: any) => Promise<any>) => fn(client);
+
+    return await runWithRetry(async () => {
+      return await runner(async (tx: any) => {
+        return await executeEvaluation(variantId, tx);
+      });
+    });
+  } finally {
+    releaseLock();
+  }
 }
 
 /**

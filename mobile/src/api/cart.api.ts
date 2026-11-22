@@ -32,6 +32,7 @@ export interface Cart {
 export interface AddCartItemInput {
   productId: string;
   sellerId: string;
+  offerId?: string;
   productName: string;
   productImage: string;
   price: number;

@@ -5,6 +5,7 @@ import type {
   CreateReviewPayload,
   Product,
   ProductFilters,
+  ProductOffer,
   ProductReview,
   ProductVariant,
 } from '@/types/product.types';
@@ -129,6 +130,47 @@ export const productsApi = {
       inStock: Boolean(v.inStock ?? Number(v.availableStock ?? v.stock ?? 0) > 0),
       images: (v.images as string[]) ?? undefined,
     }));
+  },
+
+  /**
+   * Get active public seller offers for a canonical product or variant.
+   * Powers the multi-vendor Buy Box and alternative seller comparison.
+   */
+  async getOffers(productId: string, variantId?: string): Promise<ProductOffer[]> {
+    const url = variantId
+      ? `/products/${productId}/variants/${variantId}/offers`
+      : `/products/${productId}/offers`;
+    const { data } = await apiClient.get<any>(url);
+    const payload = data?.data ?? data;
+    const rawOffers = payload?.offers ?? (Array.isArray(payload) ? payload : []);
+    return rawOffers.map((o: any) => ({
+      id:             o.id,
+      productId:      o.productId,
+      variantId:      o.variantId,
+      sellerId:       o.sellerId,
+      sellerSku:      o.sellerSku,
+      price:          Number(o.price),
+      compareAtPrice: o.compareAtPrice != null ? Number(o.compareAtPrice) : null,
+      currency:       o.currency ?? 'UGX',
+      condition:      o.condition ?? 'NEW',
+      conditionNote:  o.conditionNote,
+      moq:            Number(o.moq ?? 1),
+      wholesaleTiers: o.wholesaleTiers,
+      isBuyBoxWinner: Boolean(o.isBuyBoxWinner),
+      status:         o.status ?? 'ACTIVE',
+      isInStock:      Boolean(o.isInStock ?? ((Number(o.stock ?? 0) - Number(o.reserved ?? 0)) > 0)),
+      stock:          o.stock != null ? Number(o.stock) : undefined,
+      reserved:       o.reserved != null ? Number(o.reserved) : undefined,
+      createdAt:      o.createdAt ?? new Date().toISOString(),
+    }));
+  },
+
+  /**
+   * Retrieve Buy Box evaluation status for all variants of a product.
+   */
+  async getBuyBox(productId: string): Promise<any[]> {
+    const { data } = await apiClient.get<any>(`/products/${productId}/buybox`);
+    return data?.data ?? data ?? [];
   },
 
   // `listByCategory` was here, calling GET /products/category/:id — a route

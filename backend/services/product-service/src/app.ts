@@ -124,6 +124,8 @@ app.delete('/api/v1/products/:id/variants/:variantId',   requireSeller, variantC
 app.get   ('/api/v1/products/:id/offers',                     offerController.publicListForProduct);
 app.get   ('/api/v1/products/:id/variants/:variantId/offers', offerController.publicListForVariant);
 app.get   ('/api/v1/offers/:id',                              optionalAuth, offerController.publicGet);
+app.get   ('/api/v1/products/:id/buybox',                     offerController.getBuyBoxForProduct);
+app.get   ('/api/v1/products/variants/:variantId/buybox',     offerController.getBuyBoxForVariant);
 
 // ── Review Routes ─────────────────────────────────────────────────────────────
 
@@ -188,6 +190,7 @@ app.patch('/api/v1/admin/products/:id/moderate',    productController.moderate);
 // ── Admin Offer Moderation Routes (/api/v1/admin/offers) ──────────────────────
 app.get  ('/api/v1/admin/offers',                  requireAdmin, offerController.adminList);
 app.patch('/api/v1/admin/offers/:id/moderate',     requireAdmin, offerController.adminModerate);
+app.post ('/api/v1/admin/buybox/recalculate',      requireAdmin, offerController.adminRecalculateBuyBox);
 
 // ── Admin: rebuild the search index ───────────────────────────────────────────
 //

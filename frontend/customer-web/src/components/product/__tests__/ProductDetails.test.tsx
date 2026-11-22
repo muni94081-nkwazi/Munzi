@@ -71,8 +71,8 @@ function variant(id: string, over: Record<string, unknown> = {}) {
   } as never;
 }
 
-const render = (p = product(), variants: never[] = []) =>
-  renderWithProviders(<ProductDetails product={p} variants={variants} />, {
+const render = (p = product(), variants: never[] = [], offers: never[] = []) =>
+  renderWithProviders(<ProductDetails product={p} variants={variants} offers={offers} />, {
     preloadedState: signedIn(),
   });
 
@@ -304,5 +304,112 @@ describe('image ownership', () => {
     const src = main.getAttribute('src') ?? '';
     expect(src).not.toMatch(/placehold|unsplash/);
     expect(src.startsWith('data:image/svg+xml')).toBe(true);
+  });
+});
+
+describe('multi-vendor Buy Box and competing offers', () => {
+  const winnerOffer = {
+    id: 'off-winner-1',
+    productId: 'prod-9',
+    variantId: 'var-s',
+    sellerId: 'seller-winner',
+    sellerSku: 'WINNER-SKU',
+    price: 25000,
+    compareAtPrice: 30000,
+    currency: 'UGX',
+    condition: 'NEW',
+    conditionNote: null,
+    moq: 1,
+    isBuyBoxWinner: true,
+    status: 'ACTIVE',
+    isInStock: true,
+    stock: 20,
+    createdAt: new Date().toISOString(),
+  } as never;
+
+  const competingOffer = {
+    id: 'off-competitor-2',
+    productId: 'prod-9',
+    variantId: 'var-s',
+    sellerId: 'seller-competitor',
+    sellerSku: 'COMPETITOR-SKU',
+    price: 28000,
+    compareAtPrice: 30000,
+    currency: 'UGX',
+    condition: 'USED_LIKE_NEW',
+    conditionNote: null,
+    moq: 1,
+    isBuyBoxWinner: false,
+    status: 'ACTIVE',
+    isInStock: true,
+    stock: 5,
+    createdAt: new Date().toISOString(),
+  } as never;
+
+  it('renders the Buy Box winner price by default and shows featured badge', () => {
+    render(product({ price: 30000 }), [variant('var-s')], [winnerOffer, competingOffer]);
+
+    // Main price should be the winner offer's 25,000, not the canonical 30,000
+    const mainPrice = document.querySelector('.price-tag');
+    expect(mainPrice?.textContent).toContain('25,000');
+    expect(screen.getByTestId('buybox-winner-badge')).toBeTruthy();
+  });
+
+  it('passes the winning offerId and winner sellerId to addItem on Add to cart', async () => {
+    const user = userEvent.setup();
+    render(product(), [variant('var-s')], [winnerOffer, competingOffer]);
+
+    await user.click(screen.getByRole('button', { name: /^Add to cart$/i }));
+
+    await waitFor(() => expect(addItem).toHaveBeenCalledTimes(1));
+    expect(addItem.mock.calls[0][0]).toMatchObject({
+      productId: 'prod-9',
+      sellerId: 'seller-winner',
+      offerId: 'off-winner-1',
+      price: 25000,
+    });
+  });
+
+  it('switches price and sends alternative offerId when an alternative offer is selected', async () => {
+    const user = userEvent.setup();
+    render(product(), [variant('var-s')], [winnerOffer, competingOffer]);
+
+    // Select the competing offer
+    const selectBtn = screen.getByRole('button', { name: /Select offer from/i });
+    await user.click(selectBtn);
+
+    // Price should update to 28,000
+    const mainPrice = document.querySelector('.price-tag');
+    expect(mainPrice?.textContent).toContain('28,000');
+
+    // Now clicking Add to Cart should send competing offer
+    await user.click(screen.getByRole('button', { name: /^Add to cart$/i }));
+
+    await waitFor(() => expect(addItem).toHaveBeenCalledTimes(1));
+    expect(addItem.mock.calls[0][0]).toMatchObject({
+      productId: 'prod-9',
+      sellerId: 'seller-competitor',
+      offerId: 'off-competitor-2',
+      price: 28000,
+    });
+  });
+
+  it('falls back to canonical product seller and price when offers list is empty', async () => {
+    const user = userEvent.setup();
+    render(product({ price: 30000, sellerId: SELLER_ID }), [variant('var-s')], []);
+
+    const mainPrice = document.querySelector('.price-tag');
+    expect(mainPrice?.textContent).toContain('30,000');
+    expect(screen.queryByTestId('buybox-winner-badge')).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: /^Add to cart$/i }));
+
+    await waitFor(() => expect(addItem).toHaveBeenCalledTimes(1));
+    expect(addItem.mock.calls[0][0]).toMatchObject({
+      productId: 'prod-9',
+      sellerId: SELLER_ID,
+      price: 30000,
+      offerId: undefined,
+    });
   });
 });

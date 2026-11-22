@@ -77,6 +77,64 @@ export interface Product {
   tags:            string[];
   status?:         string;
   createdAt?:      string;
+  /** Active competing offers on this canonical product */
+  offers?:         ProductOffer[];
+  offersCount?:    number;
+  minOfferPrice?:  number;
+}
+
+// ── Product Offers & Buy Box ──────────────────────────────────────────────────
+
+export type ProductCondition =
+  | 'NEW'
+  | 'REFURBISHED'
+  | 'USED_LIKE_NEW'
+  | 'USED_GOOD'
+  | 'USED_FAIR'
+  | 'OPEN_BOX'
+  | 'FOR_PARTS';
+
+export type OfferStatus =
+  | 'ACTIVE'
+  | 'INACTIVE'
+  | 'OUT_OF_STOCK'
+  | 'SUSPENDED';
+
+export interface WholesaleTier {
+  minQuantity: number;
+  price: number;
+}
+
+export interface ProductOffer {
+  id:              string;
+  productId:       string;
+  variantId:       string;
+  sellerId:        string;
+  sellerSku?:      string | null;
+  price:           number;
+  compareAtPrice?: number | null;
+  currency:        string;
+  condition:       ProductCondition;
+  conditionNote?:  string | null;
+  moq:             number;
+  wholesaleTiers?: WholesaleTier[] | null;
+  isBuyBoxWinner:  boolean;
+  status:          OfferStatus;
+  stock:           number;
+  reserved:        number;
+  lowStockThreshold?: number;
+  isInStock?:      boolean;
+  createdAt:       string;
+  updatedAt?:      string;
+  sellerName?:     string;
+  storeName?:      string;
+  sellerRating?:   number;
+}
+
+export interface BuyBoxResult {
+  winner:   ProductOffer | null;
+  competingOffers: ProductOffer[];
+  totalOffers: number;
 }
 
 /**
@@ -170,6 +228,7 @@ export interface CartItem {
   id:            string;
   productId:     string;
   sellerId:      string;
+  offerId?:      string;
   productName:   string;
   productImage:  string;
   variantId?:    string;

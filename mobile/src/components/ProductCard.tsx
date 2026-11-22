@@ -78,6 +78,11 @@ export function ProductCard({
               </Text>
             ) : null}
           </View>
+          {product.offersCount && product.offersCount > 1 ? (
+            <Text style={styles.offersText} numberOfLines={1}>
+              {product.offersCount} offers from {formatPrice(product.minOfferPrice ?? product.price, product.currency)}
+            </Text>
+          ) : null}
           {outOfStock ? <Text style={styles.outOfStockText}>Out of stock</Text> : null}
         </View>
       </TouchableOpacity>
@@ -137,6 +142,11 @@ export function ProductCard({
             {hasDiscount ? (
               <Text style={styles.originalPrice} numberOfLines={1}>
                 {formatPrice(product.compareAtPrice!, product.currency)}
+              </Text>
+            ) : null}
+            {product.offersCount && product.offersCount > 1 ? (
+              <Text style={styles.offersText} numberOfLines={1}>
+                {product.offersCount} offers from {formatPrice(product.minOfferPrice ?? product.price, product.currency)}
               </Text>
             ) : null}
           </View>
@@ -232,6 +242,7 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   outOfStockText: { color: Colors.error, fontSize: FontSize.xs, fontWeight: '600', marginTop: 2 },
+  offersText: { color: Colors.primaryDark, fontSize: FontSize.xs, fontWeight: '600', marginTop: 2 },
   info: { padding: Spacing.sm },
   name: { fontSize: FontSize.sm, color: Colors.text.primary, fontWeight: '500', minHeight: 34 },
   seller: { fontSize: FontSize.xs, color: Colors.text.muted, marginTop: 2 },

@@ -7,6 +7,8 @@ import {
   evaluateBuyBoxForProduct,
   recalculateBuyBoxForSeller,
   calculateBuyBoxScore,
+  toPublicBuyBoxOffer,
+  toPublicBuyBoxResult,
 } from './buybox.service.js';
 
 export {
@@ -14,6 +16,8 @@ export {
   evaluateBuyBoxForProduct,
   recalculateBuyBoxForSeller,
   calculateBuyBoxScore,
+  toPublicBuyBoxOffer,
+  toPublicBuyBoxResult,
 };
 
 // ── Custom Errors ─────────────────────────────────────────────────────────────

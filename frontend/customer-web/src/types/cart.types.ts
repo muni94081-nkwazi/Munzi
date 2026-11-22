@@ -2,6 +2,7 @@ export interface CartItem {
   id: string;
   productId: string;
   vendorId: string;
+  offerId?: string;
   productName: string;
   productSku: string;
   productImageUrl: string | null;
@@ -34,6 +35,7 @@ export interface Cart {
 export interface AddCartItemPayload {
   productId: string;
   sellerId: string;
+  offerId?: string;
   productName: string;
   productImage: string;
   price: number;

@@ -76,7 +76,7 @@ function dispatch(
       ...(token ? { authorization: `Bearer ${token}` } : {}),
     };
     if (body) {
-      req.body = body;
+      (req as any).body = body;
     }
 
     const res = new http.ServerResponse(req);
@@ -93,7 +93,7 @@ function dispatch(
       return res;
     };
 
-    app.handle(req, res, () => {
+    (app as any).handle(req, res, () => {
       resolve({ status: 404, body: null });
     });
   });
@@ -217,6 +217,40 @@ describe('Gate 3A: Admin Offer Moderation (/api/v1/admin/offers)', () => {
       status: 'SUSPENDED',
       reason: 'Counterfeit check',
     });
+
+    expect(status).toBe(200);
+    expect(proxy).toHaveBeenCalledTimes(1);
+    expect(proxy.mock.calls[0][2]).toBe('http://product-service:4002');
+  });
+});
+
+describe('Gate 3B.1: Admin Buy Box Recalculation Route (/api/v1/admin/buybox/recalculate)', () => {
+  it('returns 401 to an anonymous caller attempting to recalculate Buy Box', async () => {
+    const { status, body } = await dispatch('POST', '/api/v1/admin/buybox/recalculate', undefined, { variantId: 'var-1' });
+
+    expect(status).toBe(401);
+    expect(body.error.code).toBe('UNAUTHORIZED');
+    expect(proxy).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 to a customer attempting to recalculate Buy Box', async () => {
+    const { status, body } = await dispatch('POST', '/api/v1/admin/buybox/recalculate', customerToken, { variantId: 'var-1' });
+
+    expect(status).toBe(403);
+    expect(body.error.code).toBe('FORBIDDEN');
+    expect(proxy).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 to a seller attempting to recalculate Buy Box', async () => {
+    const { status, body } = await dispatch('POST', '/api/v1/admin/buybox/recalculate', sellerToken, { variantId: 'var-1' });
+
+    expect(status).toBe(403);
+    expect(body.error.code).toBe('FORBIDDEN');
+    expect(proxy).not.toHaveBeenCalled();
+  });
+
+  it('proxies POST /api/v1/admin/buybox/recalculate to product-service for an administrator', async () => {
+    const { status } = await dispatch('POST', '/api/v1/admin/buybox/recalculate', adminToken, { variantId: 'var-1' });
 
     expect(status).toBe(200);
     expect(proxy).toHaveBeenCalledTimes(1);

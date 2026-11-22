@@ -695,6 +695,33 @@ export interface ProductVariant {
   images?: string[];
 }
 
+export interface ProductOffer {
+  id: string;
+  productId: string;
+  variantId: string;
+  sellerId: string;
+  sellerSku?: string;
+  price: number;
+  compareAtPrice?: number | null;
+  currency: string;
+  condition: 'NEW' | 'REFURBISHED' | 'USED_LIKE_NEW' | 'USED_GOOD' | 'USED_FAIR' | 'OPEN_BOX' | 'FOR_PARTS';
+  conditionNote?: string | null;
+  moq: number;
+  wholesaleTiers?: any;
+  isBuyBoxWinner: boolean;
+  status: 'ACTIVE' | 'INACTIVE' | 'OUT_OF_STOCK' | 'SUSPENDED';
+  isInStock: boolean;
+  stock?: number;
+  reserved?: number;
+  createdAt: string;
+  sellerStore?: {
+    storeName?: string;
+    rating?: number;
+    totalSales?: number;
+    isVerified?: boolean;
+  };
+}
+
 export interface ProductBundle {
   id: string;
   name: string;

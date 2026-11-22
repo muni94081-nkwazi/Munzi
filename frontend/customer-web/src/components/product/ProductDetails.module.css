@@ -347,3 +347,21 @@ a.assurance:hover .assuranceLabel { color: var(--color-interactive); text-decora
 
   .quantityRow { flex-wrap: wrap; }
 }
+
+.fullWidthSection {
+  grid-column: 1 / -1;
+  margin-top: var(--space-6);
+}
+
+.buyBoxWinnerNotice {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 10px;
+  background: #e8f5e9;
+  color: #1b5e20;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+}

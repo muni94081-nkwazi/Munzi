@@ -234,3 +234,66 @@ export async function adminModerate(req: Request, res: Response) {
     fail(res, error);
   }
 }
+
+// ── Buy Box Endpoints ─────────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/products/:id/buybox
+ * Retrieve current Buy Box status and evaluation for all variants of a canonical product.
+ * Returns public-sanitized representations with sensitive inventory/trust metrics stripped.
+ */
+export async function getBuyBoxForProduct(req: Request, res: Response) {
+  try {
+    const results = await offerService.evaluateBuyBoxForProduct(req.params.id);
+    const sanitized = results.map(offerService.toPublicBuyBoxResult).filter(Boolean);
+    res.status(200).json({ success: true, data: sanitized });
+  } catch (error) {
+    fail(res, error);
+  }
+}
+
+/**
+ * GET /api/v1/products/variants/:variantId/buybox
+ * Retrieve current Buy Box winner for a specific variant.
+ * Strips raw warehouse stock, reservations, seller SKU, and internal algorithm score breakdowns.
+ */
+export async function getBuyBoxForVariant(req: Request, res: Response) {
+  try {
+    const result = await offerService.evaluateBuyBoxForVariant(req.params.variantId);
+    if (!result) {
+      res.status(404).json({ success: false, message: 'No offers found for variant' });
+      return;
+    }
+    const sanitized = offerService.toPublicBuyBoxResult(result);
+    res.status(200).json({ success: true, data: sanitized });
+  } catch (error) {
+    fail(res, error);
+  }
+}
+
+/**
+ * POST /api/v1/admin/buybox/recalculate
+ * Manually trigger Buy Box evaluation for a variant, product, or seller.
+ */
+export async function adminRecalculateBuyBox(req: Request, res: Response) {
+  const adminId = actorId(req, res);
+  if (!adminId) return;
+
+  try {
+    const { productId, variantId, sellerId } = req.body || {};
+    let data: any = null;
+    if (variantId) {
+      data = await offerService.evaluateBuyBoxForVariant(variantId);
+    } else if (productId) {
+      data = await offerService.evaluateBuyBoxForProduct(productId);
+    } else if (sellerId) {
+      data = await offerService.recalculateBuyBoxForSeller(sellerId);
+    } else {
+      res.status(400).json({ success: false, message: 'Must provide productId, variantId, or sellerId' });
+      return;
+    }
+    res.status(200).json({ success: true, data });
+  } catch (error) {
+    fail(res, error);
+  }
+}

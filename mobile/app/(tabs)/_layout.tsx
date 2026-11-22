@@ -59,7 +59,7 @@ export default function TabsLayout() {
         options={{
           title: 'Home',
           tabBarIcon: ({ color, focused }) => (
-            <MaterialCommunityIcons name={focused ? 'home' : 'home-outline'} size={24} color={color} />
+            <MaterialCommunityIcons name={focused ? 'home' : 'home-outline'} size={24} color={color as string} />
           ),
         }}
       />
@@ -71,7 +71,7 @@ export default function TabsLayout() {
             <MaterialCommunityIcons
               name={focused ? 'view-grid' : 'view-grid-outline'}
               size={24}
-              color={color}
+              color={color as string}
             />
           ),
         }}
@@ -84,7 +84,7 @@ export default function TabsLayout() {
             <MaterialCommunityIcons
               name={focused ? 'message-text' : 'message-text-outline'}
               size={24}
-              color={color}
+              color={color as string}
             />
           ),
         }}
@@ -97,7 +97,7 @@ export default function TabsLayout() {
             <MaterialCommunityIcons
               name={focused ? 'account-circle' : 'account-circle-outline'}
               size={24}
-              color={color}
+              color={color as string}
             />
           ),
         }}

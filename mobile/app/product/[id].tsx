@@ -29,8 +29,10 @@ import { ProductRailSkeleton, SkeletonBlock } from '@/components/LoadingSkeleton
 import { QuantitySelector } from '@/components/QuantitySelector';
 import { RatingStars } from '@/components/RatingStars';
 import { SectionHeader } from '@/components/SectionHeader';
-import { variantLabel, type Variant } from '@/types';
+import { variantLabel, type Variant, type ProductOffer } from '@/types';
 import { storefrontApi, type PublicStore } from '@/api/storefront.api';
+import { productsApi } from '@/api/products.api';
+import { ProductOffersList, formatOfferCondition } from '@/components/ProductOffersList';
 
 /** Below this, the stock line becomes an urgency cue rather than a plain "in stock". */
 const LOW_STOCK_THRESHOLD = 10;
@@ -51,16 +53,12 @@ export default function ProductDetailScreen() {
   const [quantity, setQuantity] = useState(1);
   const [galleryIndex, setGalleryIndex] = useState(0);
   const [selectedVariant, setSelectedVariant] = useState<Variant | null>(null);
+  const [offers, setOffers] = useState<ProductOffer[]>([]);
+  const [selectedOfferId, setSelectedOfferId] = useState<string | null>(null);
   const [toast, setToast] = useState('');
   const [startingChat, setStartingChat] = useState(false);
 
-  // The seller's shop, resolved from the product's sellerId. product-service
-  // carries no shop name, so this is the only way to show a real one — and
-  // storefrontApi caches, so revisiting a seller's products asks once.
-  //
-  // A 404 means the seller has no public storefront. That is ordinary rather
-  // than an error: they can list products without a shop page, so the seller
-  // row and chat action simply do not render.
+  // The seller's shop, resolved from the active offer's sellerId (or base product).
   const [store, setStore] = useState<PublicStore | null>(null);
 
   const isAuthenticated = useSelector((s: RootState) => !!s.auth.accessToken);
@@ -74,53 +72,104 @@ export default function ProductDetailScreen() {
   }, [dispatch, id]);
 
   useEffect(() => {
-    // Drop the previous product first. Tapping through the related rail would
-    // otherwise show the last product's name, price and gallery under the new
-    // id until the fetch lands.
+    // Drop the previous product first.
     dispatch(setCurrentProduct(null));
     load();
     setQuantity(1);
     setGalleryIndex(0);
     setSelectedVariant(null);
+    setOffers([]);
+    setSelectedOfferId(null);
   }, [dispatch, load]);
 
-  // Resolve the shop once the product (and therefore its sellerId) is known.
+  // Fetch competing offers whenever the product or selected variant changes
   useEffect(() => {
-    const sellerId = product?.sellerId;
-    if (!sellerId) {
+    if (!product?.id) {
+      setOffers([]);
+      return;
+    }
+    let cancelled = false;
+    productsApi
+      .getProductOffers(product.id, selectedVariant?.id)
+      .then((data) => {
+        if (!cancelled) setOffers(data);
+      })
+      .catch(() => {
+        if (!cancelled) setOffers([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [product?.id, selectedVariant?.id]);
+
+  // Variant-scoped offers (or product-wide offers)
+  const variantOffers = useMemo(() => {
+    if (!offers || offers.length === 0) return [];
+    if (!selectedVariant?.id) return offers;
+    const matching = offers.filter((o) => o.variantId === selectedVariant.id);
+    return matching.length > 0 ? matching : offers;
+  }, [offers, selectedVariant?.id]);
+
+  // Identify Buy Box winner
+  const buyBoxWinner = useMemo(() => {
+    if (variantOffers.length === 0) return null;
+    return (
+      variantOffers.find((o) => o.isBuyBoxWinner && o.isInStock) ??
+      variantOffers.find((o) => o.isInStock) ??
+      variantOffers[0]
+    );
+  }, [variantOffers]);
+
+  // Default selection to Buy Box winner
+  useEffect(() => {
+    if (buyBoxWinner) {
+      setSelectedOfferId(buyBoxWinner.id);
+    } else {
+      setSelectedOfferId(null);
+    }
+  }, [buyBoxWinner?.id]);
+
+  const selectedOffer = useMemo(() => {
+    if (!selectedOfferId) return null;
+    return variantOffers.find((o) => o.id === selectedOfferId) ?? null;
+  }, [variantOffers, selectedOfferId]);
+
+  const activeSellerId = selectedOffer ? selectedOffer.sellerId : product?.sellerId;
+
+  // Resolve the active seller's storefront
+  useEffect(() => {
+    if (!activeSellerId) {
       setStore(null);
       return;
     }
 
     let cancelled = false;
     storefrontApi
-      .getStore(sellerId)
+      .getStore(activeSellerId)
       .then((found) => { if (!cancelled) setStore(found); })
       .catch(() => { if (!cancelled) setStore(null); });
 
     return () => { cancelled = true; };
-  }, [product?.sellerId]);
+  }, [activeSellerId]);
 
   const images = useMemo(
     () => (product?.imageUrls ?? []).filter(Boolean),
     [product],
   );
 
-  // A selected variant carries its own availability and its own absolute price;
-  // when none is chosen the product's own figures stand.
-  //
-  // `availableStock`, not `stock`: the difference is units already held by other
-  // shoppers' carts, and offering those for sale is how a checkout fails at the
-  // reservation step after the shopper has entered their payment details.
-  //
-  // `variant.price`, not `product.price + priceModifier`: product-service sends
-  // an absolute price per SKU. There is no `priceModifier` field, so that
-  // addition produced `price + undefined` → NaN as soon as a variant was picked.
-  const stock = selectedVariant?.availableStock ?? product?.stockQuantity ?? 0;
-  const price = selectedVariant?.price ?? product?.price ?? 0;
-  // compareAtPrice, not originalPrice: the server sends the former and there is
-  // no discountPct field, so the percentage is derived here rather than read.
-  const compareAt = product?.compareAtPrice ?? null;
+  // Availability, pricing, and compareAt derived from selected offer (if present)
+  // or falling back to selected variant / canonical product.
+  const stock = selectedOffer
+    ? (selectedOffer.stock !== undefined
+        ? Math.max(0, (selectedOffer.stock - (selectedOffer.reserved ?? 0)))
+        : (selectedOffer.isInStock ? 99 : 0))
+    : (selectedVariant?.availableStock ?? product?.stockQuantity ?? 0);
+
+  const price = selectedOffer ? selectedOffer.price : (selectedVariant?.price ?? product?.price ?? 0);
+  const compareAt = selectedOffer
+    ? (selectedOffer.compareAtPrice ?? null)
+    : (product?.compareAtPrice ?? null);
+
   const hasDiscount = !!compareAt && compareAt > price;
   const discountPct = hasDiscount && compareAt
     ? Math.round(((compareAt - price) / compareAt) * 100)
@@ -128,16 +177,8 @@ export default function ProductDetailScreen() {
   const outOfStock = stock <= 0;
   const saved = product ? isWishlisted(product.id) : false;
 
-  /**
-   * Opens the thread with this product's seller and goes straight into it.
-   *
-   * chat-service keys a room on (buyerId, sellerId, productId) and returns the
-   * existing one when it is already there, so this is safe to tap twice — it
-   * will not spawn duplicate threads. Every /chat route is behind the gateway's
-   * auth(), so a guest is sent to sign in and returned to this product.
-   */
   const openSellerChat = async () => {
-    if (!product?.sellerId || !store === null || startingChat) return;
+    if (!activeSellerId || !store || startingChat) return;
 
     if (!isAuthenticated) {
       router.push({ pathname: '/(auth)/login', params: { redirect: returnTo } });
@@ -147,9 +188,9 @@ export default function ProductDetailScreen() {
     setStartingChat(true);
     try {
       const conversation = await chatApi.startConversation({
-        sellerId: product.sellerId,
-        sellerStoreName: store!.storeName,
-        productId: product.id,
+        sellerId: activeSellerId,
+        sellerStoreName: store.storeName,
+        productId: product!.id,
       });
       router.push({ pathname: '/chat/[id]', params: { id: conversation.id } });
     } catch {
@@ -161,16 +202,50 @@ export default function ProductDetailScreen() {
 
   const onAddToCart = async () => {
     if (!product) return;
-    const ok = await addToCart(product, quantity, selectedVariant?.id, selectedVariant ? variantLabel(selectedVariant) : undefined);
+    const ok = await addToCart(
+      product,
+      quantity,
+      selectedVariant?.id,
+      selectedVariant ? variantLabel(selectedVariant) : undefined,
+      selectedOffer?.id,
+      price,
+      activeSellerId,
+      stock,
+    );
     if (ok) setToast(`Added ${quantity} × ${product.name} to your cart`);
   };
 
   const onBuyNow = async () => {
     if (!product) return;
-    const ok = await addToCart(product, quantity, selectedVariant?.id, selectedVariant ? variantLabel(selectedVariant) : undefined);
-    // A guest is sent to sign in by addToCart and lands back here, so only a
-    // real add moves on to checkout.
+    const ok = await addToCart(
+      product,
+      quantity,
+      selectedVariant?.id,
+      selectedVariant ? variantLabel(selectedVariant) : undefined,
+      selectedOffer?.id,
+      price,
+      activeSellerId,
+      stock,
+    );
     if (ok) router.push('/checkout');
+  };
+
+  const onAddToCartOffer = async (offer: ProductOffer) => {
+    if (!product) return;
+    const offerStock = offer.stock !== undefined
+      ? Math.max(0, (offer.stock - (offer.reserved ?? 0)))
+      : (offer.isInStock ? 99 : 0);
+    const ok = await addToCart(
+      product,
+      1,
+      offer.variantId ?? selectedVariant?.id,
+      selectedVariant ? variantLabel(selectedVariant) : undefined,
+      offer.id,
+      offer.price,
+      offer.sellerId,
+      offerStock,
+    );
+    if (ok) setToast(`Added offer from seller to your cart`);
   };
 
   const onShare = () => {
@@ -305,6 +380,28 @@ export default function ProductDetailScreen() {
                 : 'In stock'}
           </Text>
 
+          {buyBoxWinner && selectedOffer ? (
+            <View style={styles.buyBoxBanner}>
+              <MaterialCommunityIcons
+                name={selectedOffer.id === buyBoxWinner.id ? 'check-decagram' : 'information-outline'}
+                size={18}
+                color={selectedOffer.id === buyBoxWinner.id ? Colors.primaryDark : Colors.text.secondary}
+              />
+              <Text style={styles.buyBoxBannerText}>
+                {selectedOffer.id === buyBoxWinner.id
+                  ? 'Featured Best Offer on Muni'
+                  : 'Alternative offer selected'}
+              </Text>
+              {selectedOffer.condition ? (
+                <View style={styles.conditionPill}>
+                  <Text style={styles.conditionPillText}>
+                    {formatOfferCondition(selectedOffer.condition)}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
+
           {/* The real store, from marketplace-service. product-service carries
               only sellerId, so this is fetched rather than read off the product
               — and rendered only once it resolves, so nothing stands in for a
@@ -325,7 +422,7 @@ export default function ProductDetailScreen() {
           {/* chat-service requires sellerId and sellerStoreName to open a
               thread, so the action only appears when the product record
               actually carries both. */}
-          {product.sellerId && store ? (
+          {activeSellerId && store ? (
             <TouchableOpacity
               style={styles.chatSeller}
               onPress={() => void openSellerChat()}
@@ -390,6 +487,17 @@ export default function ProductDetailScreen() {
             disabled={outOfStock}
           />
         </View>
+
+        {/* ── Competing Offers ────────────────────────────────────────────── */}
+        {variantOffers.length > 0 ? (
+          <ProductOffersList
+            offers={variantOffers}
+            selectedOfferId={selectedOffer?.id}
+            currency={product.currency}
+            onSelectOffer={(offer) => setSelectedOfferId(offer.id)}
+            onAddToCartOffer={onAddToCartOffer}
+          />
+        ) : null}
 
         {/* ── Description ─────────────────────────────────────────────────── */}
         {product.description ? (
@@ -526,6 +634,37 @@ const styles = StyleSheet.create({
   },
   stock: { marginTop: Spacing.xs, color: Colors.success, fontWeight: '600', fontSize: FontSize.sm },
   stockOut: { color: Colors.error },
+  buyBoxBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#fff8ee',
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs,
+    borderRadius: BorderRadius.sm,
+    borderWidth: 1,
+    borderColor: '#fedc97',
+    marginTop: Spacing.sm,
+    gap: Spacing.xs,
+  },
+  buyBoxBannerText: {
+    fontSize: FontSize.xs,
+    color: Colors.text.primary,
+    fontWeight: '700',
+    flex: 1,
+  },
+  conditionPill: {
+    backgroundColor: Colors.white,
+    paddingHorizontal: Spacing.xs,
+    paddingVertical: 2,
+    borderRadius: BorderRadius.sm,
+    borderWidth: 1,
+    borderColor: Colors.border,
+  },
+  conditionPillText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: Colors.text.secondary,
+  },
   chatSeller: {
     flexDirection: 'row',
     alignItems: 'center',

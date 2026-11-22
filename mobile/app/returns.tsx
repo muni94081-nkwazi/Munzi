@@ -169,7 +169,7 @@ export default function ReturnsScreen() {
                 </View>
               ))}
             </View>
-          ) : null
+          ) : undefined
         }
       />
     </View>

@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { Product, ProductVariant, Seller } from '@/types/product.types';
+import type { Product, ProductOffer, ProductVariant, Seller } from '@/types/product.types';
 import { useCurrency } from '@/hooks/useCurrency';
 import { Button } from '@/components/common/Button/Button';
 import { useCart } from '@/hooks/useCart';
@@ -12,12 +12,14 @@ import { getFallbackProductSvg } from '@/utils/localImageStorage';
 import { ProductVariantSelector, type VariantOption } from '@/components/product/ProductVariantSelector';
 import { OptimizedImage } from '@/components/common/OptimizedImage/OptimizedImage';
 import { SellerBadge } from '@/components/product/SellerBadge';
+import { ProductOffersList } from '@/components/product/ProductOffersList';
 import { storefrontApi, type PublicStore } from '@/api/storefront.api';
 import styles from './ProductDetails.module.css';
 
 export interface ProductDetailsProps {
   product: Product;
   variants?: ProductVariant[];
+  offers?: ProductOffer[];
 }
 
 function toVariantOption(v: ProductVariant): VariantOption {
@@ -49,7 +51,7 @@ function HeartIcon({ filled }: { filled: boolean }) {
   );
 }
 
-export function ProductDetails({ product, variants = [] }: ProductDetailsProps) {
+export function ProductDetails({ product, variants = [], offers = [] }: ProductDetailsProps) {
   // Prices arrive in the settlement currency; render them in the market the
   // shopper picked in the footer. Falls back to the settled amount when no
   // rate is available — never a guessed figure.
@@ -58,6 +60,7 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
   const [activeImage, setActiveImage] = useState(0);
   const [quantity, setQuantity] = useState(1);
   const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null);
+  const [selectedOfferId, setSelectedOfferId] = useState<string | null>(null);
   const [isBuyingNow, setIsBuyingNow] = useState(false);
   // Tracked locally rather than taken from useCart().isLoading: that flag is
   // true while the cart is fetching anything at all, so the old buy box showed
@@ -71,6 +74,7 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
   useEffect(() => {
     // Reset variant selection when navigating to a different product.
     setSelectedVariantId(null);
+    setSelectedOfferId(null);
     setQuantity(1);
     setActiveImage(0);
   }, [product.id]);
@@ -88,11 +92,50 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
 
   const selectedVariant = variants.find((v) => v.id === selectedVariantId) ?? null;
 
-  // Falls back to the base product's price/stock until a variant is picked.
-  const effectivePrice = selectedVariant?.price ?? product.price;
-  const effectiveCompareAtPrice = selectedVariant?.compareAtPrice ?? product.compareAtPrice;
-  const effectiveInStock = selectedVariant ? selectedVariant.inStock : product.inStock;
-  const effectiveStock = selectedVariant?.stockQuantity ?? product.stockQuantity ?? 0;
+  // Variant-scoped offers (or product-wide offers if no variant matches)
+  const variantOffers = useMemo(() => {
+    if (!offers || offers.length === 0) return [];
+    if (!selectedVariantId) return offers;
+    const matching = offers.filter((o) => o.variantId === selectedVariantId);
+    return matching.length > 0 ? matching : offers;
+  }, [offers, selectedVariantId]);
+
+  // Identify Buy Box winner for the current variant
+  const buyBoxWinner = useMemo(() => {
+    if (variantOffers.length === 0) return null;
+    return (
+      variantOffers.find((o) => o.isBuyBoxWinner && o.isInStock) ??
+      variantOffers.find((o) => o.isInStock) ??
+      variantOffers[0]
+    );
+  }, [variantOffers]);
+
+  // Sync selected offer with Buy Box winner when variant changes or offers load
+  useEffect(() => {
+    if (buyBoxWinner) {
+      setSelectedOfferId(buyBoxWinner.id);
+    } else {
+      setSelectedOfferId(null);
+    }
+  }, [buyBoxWinner?.id]);
+
+  const selectedOffer = useMemo(() => {
+    if (!selectedOfferId) return buyBoxWinner;
+    return offers.find((o) => o.id === selectedOfferId) ?? buyBoxWinner;
+  }, [offers, selectedOfferId, buyBoxWinner]);
+
+  // Falls back to the base product's price/stock until an offer or variant is picked.
+  const effectivePrice = selectedOffer ? selectedOffer.price : (selectedVariant?.price ?? product.price);
+  const effectiveCompareAtPrice = selectedOffer
+    ? (selectedOffer.compareAtPrice ?? undefined)
+    : (selectedVariant?.compareAtPrice ?? product.compareAtPrice);
+  const effectiveInStock = selectedOffer
+    ? selectedOffer.isInStock
+    : (selectedVariant ? selectedVariant.inStock : product.inStock);
+  const effectiveStock = selectedOffer
+    ? (selectedOffer.stock ?? 10)
+    : (selectedVariant?.stockQuantity ?? product.stockQuantity ?? 0);
+  const effectiveSellerId = selectedOffer?.sellerId ?? product.sellerId ?? product.seller?.id;
 
   /**
    * The gallery is what the catalogue holds, and nothing else.
@@ -145,7 +188,7 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
   const [store, setStore] = useState<PublicStore | null>(null);
 
   useEffect(() => {
-    const sellerId = product.sellerId ?? product.seller?.id;
+    const sellerId = effectiveSellerId;
     if (!sellerId) {
       setStore(null);
       return;
@@ -160,7 +203,7 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
       .catch(() => { if (!cancelled) setStore(null); });
 
     return () => { cancelled = true; };
-  }, [product.sellerId, product.seller?.id]);
+  }, [effectiveSellerId]);
 
   /** The real store, in the shape SellerBadge already renders. */
   const sellerForDisplay = useMemo<Seller | null>(() => {
@@ -178,17 +221,9 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
     };
   }, [store, product.seller]);
 
-  /** Shared by Add to Cart and Buy Now, so both send the same variant. */
+  /** Shared by Add to Cart and Buy Now, so both send the same variant and offer. */
   async function addSelectionToCart(): Promise<boolean> {
-    // The seller is taken from the product itself, which is the authoritative
-    // value: product-service stamps `sellerId` from the gateway-verified
-    // identity at creation, and cart-service keys the line on it.
-    //
-    // The storefront below is display only. A seller who has not set up a store
-    // page still has products to sell, so a missing store must not block a
-    // purchase — but a product with no sellerId at all is genuinely malformed
-    // and cart-service would reject it, so that is still refused here.
-    const sellerId = product.sellerId ?? product.seller?.id;
+    const sellerId = effectiveSellerId;
     if (!sellerId) {
       dispatch(showToast('This product is missing seller information and cannot be added to cart', 'error'));
       return false;
@@ -197,6 +232,7 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
     await addItem({
       productId: product.id,
       sellerId,
+      offerId: selectedOffer?.id,
       productName: product.name,
       productImage: currentImg ?? '',
       price: effectivePrice,
@@ -207,6 +243,29 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
       weight: product.weight?.value,
     });
     return true;
+  }
+
+  async function handleAddToCartOffer(offer: ProductOffer) {
+    setSelectedOfferId(offer.id);
+    try {
+      await addItem({
+        productId: product.id,
+        sellerId: offer.sellerId,
+        offerId: offer.id,
+        productName: product.name,
+        productImage: currentImg ?? '',
+        price: offer.price,
+        quantity: 1,
+        maxQuantity: offer.stock ?? 10,
+        variantId: offer.variantId ?? selectedVariant?.id,
+        variantLabel: selectedVariant ? variantOptions.find((v) => v.id === selectedVariant.id)?.label : undefined,
+        weight: product.weight?.value,
+      });
+      dispatch(showToast(`${product.name} added to cart`, 'success'));
+      dispatch(openCartDrawer());
+    } catch (error) {
+      dispatch(showToast(errorMessage(error, 'Could not add this item to your cart'), 'error'));
+    }
   }
 
   async function handleAddToCart() {
@@ -356,6 +415,12 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
           </p>
         )}
 
+        {selectedOffer?.isBuyBoxWinner && (
+          <div className={styles.buyBoxWinnerNotice} data-testid="buybox-winner-badge">
+            <span aria-hidden="true">✓</span> Featured Best Offer on Muni
+          </div>
+        )}
+
         <hr className={styles.divider} />
 
         <div className={styles.priceRow}>
@@ -469,6 +534,17 @@ export function ProductDetails({ product, variants = [] }: ProductDetailsProps) 
           </div>
         )}
       </div>
+
+      {variantOffers.length > 0 && (
+        <div className={styles.fullWidthSection}>
+          <ProductOffersList
+            offers={variantOffers}
+            selectedOfferId={selectedOffer?.id}
+            onSelectOffer={(offer) => setSelectedOfferId(offer.id)}
+            onAddToCartOffer={handleAddToCartOffer}
+          />
+        </div>
+      )}
     </div>
   );
 }

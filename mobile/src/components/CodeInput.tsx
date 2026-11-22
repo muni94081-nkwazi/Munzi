@@ -1,5 +1,5 @@
 import React, { useRef } from 'react';
-import { View, StyleSheet, TextInput, type NativeSyntheticEvent, type TextInputKeyPressEventData } from 'react-native';
+import { View, StyleSheet, TextInput } from 'react-native';
 import { Colors } from '../constants/theme';
 
 interface CodeInputProps {
@@ -28,7 +28,7 @@ export function CodeInput({
   disabled = false,
   invalid = false,
 }: CodeInputProps) {
-  const inputs = useRef<Array<TextInput | null>>([]);
+  const inputs = useRef<Array<any>>([]);
 
   const setDigits = (next: string) => {
     const digits = next.replace(/\D/g, '').slice(0, length);
@@ -53,7 +53,7 @@ export function CodeInput({
 
   const handleKeyPress = (
     index: number,
-    event: NativeSyntheticEvent<TextInputKeyPressEventData>,
+    event: any,
   ) => {
     // Backspace on an empty box steps back, which is what the finger expects.
     if (event.nativeEvent.key === 'Backspace' && !value[index] && index > 0) {

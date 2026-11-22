@@ -1,5 +1,5 @@
 import { apiClient, type ApiEnvelope } from './client';
-import type { Category, Product } from '@/types';
+import type { BuyBoxResult, Category, Product, ProductOffer } from '@/types';
 
 // ─── Reviews ──────────────────────────────────────────────────────────────────
 //
@@ -192,6 +192,30 @@ export const productsApi = {
       `/api/v1/products/${productId}/related`
     );
     return data.data;
+  },
+
+  /**
+   * GET /api/v1/products/:id/offers (or /variants/:variantId/offers)
+   * Fetch active competing offers across all sellers for a product or specific variant.
+   */
+  getProductOffers: async (productId: string, variantId?: string): Promise<ProductOffer[]> => {
+    const url = variantId
+      ? `/api/v1/products/${productId}/variants/${variantId}/offers`
+      : `/api/v1/products/${productId}/offers`;
+    const { data } = await apiClient.get<{ success: boolean; offers: ProductOffer[] }>(url);
+    return data.offers ?? [];
+  },
+
+  /**
+   * GET /api/v1/products/:id/buybox (or /variants/:variantId/buybox)
+   * Fetch the current Buy Box winner algorithmically chosen for this canonical product.
+   */
+  getBuyBox: async (productId: string, variantId?: string): Promise<BuyBoxResult | null> => {
+    const url = variantId
+      ? `/api/v1/products/variants/${variantId}/buybox`
+      : `/api/v1/products/${productId}/buybox`;
+    const { data } = await apiClient.get<{ success: boolean; data: BuyBoxResult }>(url);
+    return data.data ?? null;
   },
 
   /**

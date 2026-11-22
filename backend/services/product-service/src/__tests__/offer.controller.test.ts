@@ -17,15 +17,22 @@ import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals
 import type { Request, Response } from 'express';
 
 // ── Mock Offer Service ────────────────────────────────────────────────────────
+const { toPublicBuyBoxResult, toPublicBuyBoxOffer } = await import('../services/buybox.service.js');
+
 const mockOfferService = {
-  createOffer:            jest.fn<(...args: any[]) => any>(),
-  updateOffer:            jest.fn<(...args: any[]) => any>(),
-  deleteOffer:            jest.fn<(...args: any[]) => any>(),
-  getOfferById:           jest.fn<(...args: any[]) => any>(),
-  listPublicOffers:       jest.fn<(...args: any[]) => any>(),
-  listSellerOffers:       jest.fn<(...args: any[]) => any>(),
-  listAdminOffers:        jest.fn<(...args: any[]) => any>(),
-  adminModerateOffer:     jest.fn<(...args: any[]) => any>(),
+  createOffer:                jest.fn<(...args: any[]) => any>(),
+  updateOffer:                jest.fn<(...args: any[]) => any>(),
+  deleteOffer:                jest.fn<(...args: any[]) => any>(),
+  getOfferById:               jest.fn<(...args: any[]) => any>(),
+  listPublicOffers:           jest.fn<(...args: any[]) => any>(),
+  listSellerOffers:           jest.fn<(...args: any[]) => any>(),
+  listAdminOffers:            jest.fn<(...args: any[]) => any>(),
+  adminModerateOffer:         jest.fn<(...args: any[]) => any>(),
+  evaluateBuyBoxForProduct:   jest.fn<(...args: any[]) => any>(),
+  evaluateBuyBoxForVariant:   jest.fn<(...args: any[]) => any>(),
+  recalculateBuyBoxForSeller: jest.fn<(...args: any[]) => any>(),
+  toPublicBuyBoxResult,
+  toPublicBuyBoxOffer,
 };
 
 jest.unstable_mockModule('../services/offer.service.js', () => mockOfferService);
@@ -338,5 +345,156 @@ describe('offerController admin endpoints', () => {
     expect(mockOfferService.listAdminOffers).toHaveBeenCalled();
     expect(statusSpy).toHaveBeenCalledWith(200);
     expect(jsonSpy).toHaveBeenCalledWith(expect.objectContaining({ success: true, total: 2 }));
+  });
+});
+
+// ── 6. Buy Box Endpoints ──────────────────────────────────────────────────────
+
+describe('offerController Buy Box endpoints', () => {
+  const rawEvaluationResult = {
+    variantId: 'var-1',
+    productId: 'prod-123',
+    winningOfferId: 'off-1',
+    winner: {
+      id:             'off-1',
+      productId:      'prod-123',
+      variantId:      'var-1',
+      sellerId:       'seller-alpha',
+      sellerSku:      'PRIVATE-ALPHA-SKU-999',
+      price:          250000,
+      compareAtPrice: 300000,
+      currency:       'UGX',
+      condition:      'NEW',
+      conditionNote:  'Factory sealed',
+      moq:            1,
+      wholesaleTiers: null,
+      stock:          50,
+      reserved:       12,
+      status:         'ACTIVE',
+      isBuyBoxWinner: true,
+      createdAt:      new Date('2026-01-01T00:00:00Z'),
+    },
+    score: 950,
+    breakdown: {
+      priceScore:       600,
+      stockScore:       200,
+      conditionScore:   150,
+      sellerTrustScore: 50,
+      totalScore:       950,
+    },
+    evaluatedCount: 5,
+    eligibleCount:   3,
+  };
+
+  it('getBuyBoxForProduct returns 200 with sanitized array of variant winners', async () => {
+    const { req, res, statusSpy, jsonSpy } = mockReqRes({
+      params: { id: 'prod-123' },
+    });
+
+    mockOfferService.evaluateBuyBoxForProduct.mockResolvedValueOnce([rawEvaluationResult]);
+
+    await offerController.getBuyBoxForProduct(req as Request, res as Response);
+
+    expect(mockOfferService.evaluateBuyBoxForProduct).toHaveBeenCalledWith('prod-123');
+    expect(statusSpy).toHaveBeenCalledWith(200);
+
+    const callArg = jsonSpy.mock.calls[0][0] as any;
+    expect(callArg.success).toBe(true);
+    expect(callArg.data).toHaveLength(1);
+
+    const publicItem = callArg.data[0];
+    expect(publicItem.variantId).toBe('var-1');
+    expect(publicItem.winningOfferId).toBe('off-1');
+    expect(publicItem.hasWinner).toBe(true);
+    expect(publicItem.inStock).toBe(true);
+    expect(publicItem.winner.price).toBe(250000);
+
+    // Assert sensitive fields do not leak in public product Buy Box
+    expect(publicItem.score).toBeUndefined();
+    expect(publicItem.breakdown).toBeUndefined();
+    expect(publicItem.evaluatedCount).toBeUndefined();
+    expect(publicItem.winner.stock).toBeUndefined();
+    expect(publicItem.winner.reserved).toBeUndefined();
+    expect(publicItem.winner.sellerSku).toBeUndefined();
+  });
+
+  it('getBuyBoxForVariant returns 200 with sanitized winner and strips private inventory/trust metrics', async () => {
+    const { req, res, statusSpy, jsonSpy } = mockReqRes({
+      params: { variantId: 'var-1' },
+    });
+
+    mockOfferService.evaluateBuyBoxForVariant.mockResolvedValueOnce(rawEvaluationResult);
+
+    await offerController.getBuyBoxForVariant(req as Request, res as Response);
+
+    expect(mockOfferService.evaluateBuyBoxForVariant).toHaveBeenCalledWith('var-1');
+    expect(statusSpy).toHaveBeenCalledWith(200);
+
+    const callArg = jsonSpy.mock.calls[0][0] as any;
+    expect(callArg.success).toBe(true);
+    const data = callArg.data;
+
+    // Public shopper display fields MUST be present
+    expect(data.variantId).toBe('var-1');
+    expect(data.productId).toBe('prod-123');
+    expect(data.winningOfferId).toBe('off-1');
+    expect(data.hasWinner).toBe(true);
+    expect(data.inStock).toBe(true);
+    expect(data.winner.price).toBe(250000);
+    expect(data.winner.condition).toBe('NEW');
+    expect(data.winner.isBuyBoxWinner).toBe(true);
+
+    // Sensitive merchant / internal fields MUST NOT leak
+    expect(data.winner.stock).toBeUndefined();
+    expect(data.winner.reserved).toBeUndefined();
+    expect(data.winner.sellerSku).toBeUndefined();
+    expect(data.winner.status).toBeUndefined();
+    expect(data.score).toBeUndefined();
+    expect(data.breakdown).toBeUndefined();
+    expect(data.evaluatedCount).toBeUndefined();
+    expect(data.eligibleCount).toBeUndefined();
+  });
+
+  it('getBuyBoxForVariant returns 404 when no offers exist for variant', async () => {
+    const { req, res, statusSpy, jsonSpy } = mockReqRes({
+      params: { variantId: 'var-empty' },
+    });
+
+    mockOfferService.evaluateBuyBoxForVariant.mockResolvedValueOnce(null);
+
+    await offerController.getBuyBoxForVariant(req as Request, res as Response);
+
+    expect(statusSpy).toHaveBeenCalledWith(404);
+    expect(jsonSpy).toHaveBeenCalledWith(expect.objectContaining({ success: false, message: 'No offers found for variant' }));
+  });
+
+  it('adminRecalculateBuyBox returns 200 on recalculation by variantId with full diagnostic data', async () => {
+    const { req, res, statusSpy, jsonSpy } = mockReqRes({
+      userId: 'admin-1',
+      roles:  ['ROLE_ADMIN'],
+      body:   { variantId: 'var-1' },
+    });
+
+    mockOfferService.evaluateBuyBoxForVariant.mockResolvedValueOnce(rawEvaluationResult);
+
+    await offerController.adminRecalculateBuyBox(req as Request, res as Response);
+
+    expect(mockOfferService.evaluateBuyBoxForVariant).toHaveBeenCalledWith('var-1');
+    expect(statusSpy).toHaveBeenCalledWith(200);
+    // Admins retain diagnostic scoring and count data
+    expect(jsonSpy).toHaveBeenCalledWith({ success: true, data: rawEvaluationResult });
+  });
+
+  it('adminRecalculateBuyBox returns 400 when no target identifier is provided', async () => {
+    const { req, res, statusSpy, jsonSpy } = mockReqRes({
+      userId: 'admin-1',
+      roles:  ['ROLE_ADMIN'],
+      body:   {},
+    });
+
+    await offerController.adminRecalculateBuyBox(req as Request, res as Response);
+
+    expect(statusSpy).toHaveBeenCalledWith(400);
+    expect(jsonSpy).toHaveBeenCalledWith(expect.objectContaining({ success: false, message: 'Must provide productId, variantId, or sellerId' }));
   });
 });

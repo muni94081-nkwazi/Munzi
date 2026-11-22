@@ -35,7 +35,16 @@ export function useProductActions(returnTo: string) {
   );
 
   const addToCart = useCallback(
-    async (product: Product, quantity = 1, variantId?: string, variantLabel?: string) => {
+    async (
+      product: Product,
+      quantity = 1,
+      variantId?: string,
+      variantLabel?: string,
+      offerId?: string,
+      overridePrice?: number,
+      overrideSellerId?: string,
+      overrideMaxQuantity?: number,
+    ) => {
       if (!isAuthenticated) {
         promptSignIn(returnTo);
         return false;
@@ -43,12 +52,13 @@ export function useProductActions(returnTo: string) {
       const result = await dispatch(
         addCartItemThunk({
           productId: product.id,
-          sellerId: product.sellerId,
+          sellerId: overrideSellerId ?? product.sellerId,
+          offerId,
           productName: product.name,
           productImage: product.imageUrls?.[0] ?? '',
-          price: product.price,
+          price: overridePrice ?? product.price,
           quantity,
-          maxQuantity: product.stockQuantity,
+          maxQuantity: overrideMaxQuantity ?? product.stockQuantity,
           variantId,
           variantLabel,
         }),

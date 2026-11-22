@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useSelector } from 'react-redux';
+import { useNavigate } from 'react-router-dom';
 import { useInventory } from '../hooks/useInventory';
 import { selectUser } from '../store/slices/authSlice';
 import type { InventoryItem } from '../api/inventory.api';
@@ -22,6 +23,7 @@ function stockState(item: InventoryItem): { color: string; label: string } {
 }
 
 export function InventoryPage() {
+  const navigate = useNavigate();
   const user = useSelector(selectUser);
   const { inventory, lowStockItems, isLoading, error, updateStock, fetchInventory } = useInventory();
 
@@ -66,7 +68,28 @@ export function InventoryPage() {
 
   return (
     <div>
-      <h1 style={{ fontSize: 24, fontWeight: 700, marginBottom: 16 }}>Inventory Management</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <h1 style={{ fontSize: 24, fontWeight: 700, margin: 0 }}>Inventory Management</h1>
+        <button
+          type="button"
+          onClick={() => navigate('/offers')}
+          style={{
+            padding: '8px 16px',
+            background: '#eff6ff',
+            border: '1px solid #bfdbfe',
+            borderRadius: 6,
+            color: '#1d4ed8',
+            fontSize: 13,
+            fontWeight: 600,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          🏷️ Manage Competing Offers &amp; Buy Box
+        </button>
+      </div>
 
       {error && (
         <div role="alert" style={{ background: '#fee2e2', border: '1px solid #ef4444', borderRadius: 8, padding: '12px 16px', marginBottom: 20, color: '#991b1b', fontSize: 14 }}>

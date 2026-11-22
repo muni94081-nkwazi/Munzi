@@ -12,7 +12,8 @@ import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals
 // ── Mock Prisma & Dependencies ────────────────────────────────────────────────
 
 const mockPrisma: any = {
-  $queryRaw:    jest.fn<(...args: any[]) => any>(),
+  $queryRaw:    jest.fn<(...args: any[]) => any>().mockResolvedValue([]),
+  $executeRaw:  jest.fn<(...args: any[]) => any>().mockResolvedValue(1),
   $transaction: jest.fn<(...args: any[]) => any>(),
   product: {
     findUnique: jest.fn<(...args: any[]) => any>(),
@@ -51,6 +52,9 @@ const {
   calculateBuyBoxScore,
   evaluateBuyBoxForVariant,
   evaluateBuyBoxForProduct,
+  toPublicBuyBoxOffer,
+  toPublicBuyBoxResult,
+  runWithRetry,
 } = await import('../services/buybox.service.js');
 
 // ── Shared Fixtures ───────────────────────────────────────────────────────────
@@ -515,5 +519,172 @@ describe('evaluateBuyBoxForProduct — Multi-Variant Independence', () => {
 
     const results = await evaluateBuyBoxForProduct('prod-empty', mockPrisma);
     expect(results).toEqual([]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4. Public Sanitization Helpers (Gate 3B.1)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('toPublicBuyBoxOffer & toPublicBuyBoxResult — Public Sanitization', () => {
+  it('strips private warehouse inventory and seller SKU from candidate offers', () => {
+    const rawOffer = makeOffer({
+      id:        'off-secret',
+      sellerSku: 'PRIVATE-SKU-42',
+      stock:     100,
+      reserved:  15,
+      price:     45000,
+    });
+
+    const publicOffer = toPublicBuyBoxOffer(rawOffer);
+
+    expect(publicOffer).not.toBeNull();
+    expect(publicOffer!.id).toBe('off-secret');
+    expect(publicOffer!.price).toBe(45000);
+    expect(publicOffer!.inStock).toBe(true);
+
+    // Private fields MUST NOT exist
+    expect((publicOffer as any).stock).toBeUndefined();
+    expect((publicOffer as any).reserved).toBeUndefined();
+    expect((publicOffer as any).sellerSku).toBeUndefined();
+  });
+
+  it('correctly sets inStock to false when sellable stock is zero or negative', () => {
+    const outOfStockOffer = makeOffer({ stock: 5, reserved: 5 });
+    const publicOffer = toPublicBuyBoxOffer(outOfStockOffer);
+
+    expect(publicOffer!.inStock).toBe(false);
+  });
+
+  it('strips internal algorithmic breakdown, score and counts from Buy Box result', () => {
+    const rawResult = {
+      variantId:      'var-100',
+      productId:      'prod-100',
+      winningOfferId: 'off-100',
+      winner: makeOffer({
+        id:        'off-100',
+        sellerSku: 'INTERNAL-SKU',
+        stock:     20,
+        reserved:  2,
+        price:     50000,
+      }),
+      score:     980,
+      breakdown: {
+        priceScore:       600,
+        stockScore:       200,
+        conditionScore:   150,
+        sellerTrustScore: 30,
+        totalScore:       980,
+      },
+      evaluatedCount: 4,
+      eligibleCount:   2,
+    };
+
+    const publicResult = toPublicBuyBoxResult(rawResult as any);
+
+    expect(publicResult).not.toBeNull();
+    expect(publicResult!.variantId).toBe('var-100');
+    expect(publicResult!.productId).toBe('prod-100');
+    expect(publicResult!.winningOfferId).toBe('off-100');
+    expect(publicResult!.hasWinner).toBe(true);
+    expect(publicResult!.inStock).toBe(true);
+    expect(publicResult!.winner!.price).toBe(50000);
+
+    // Internal scoring & diagnostics MUST NOT leak
+    expect((publicResult as any).score).toBeUndefined();
+    expect((publicResult as any).breakdown).toBeUndefined();
+    expect((publicResult as any).evaluatedCount).toBeUndefined();
+    expect((publicResult as any).eligibleCount).toBeUndefined();
+    expect((publicResult!.winner as any).stock).toBeUndefined();
+    expect((publicResult!.winner as any).reserved).toBeUndefined();
+    expect((publicResult!.winner as any).sellerSku).toBeUndefined();
+  });
+
+  it('handles null evaluation result gracefully', () => {
+    expect(toPublicBuyBoxResult(null)).toBeNull();
+    expect(toPublicBuyBoxOffer(null)).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 5. Concurrency & Serialization Hardening (Gate 3B.1)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('Concurrency & Serialization Hardening', () => {
+  it('serializes concurrent evaluations for the same variant and yields consistent winner', async () => {
+    const offer1 = makeOffer({ id: 'off-cheap', price: 100000, stock: 10 });
+    const offer2 = makeOffer({ id: 'off-expensive', price: 500000, stock: 10 });
+
+    mockPrisma.productOffer.findMany.mockResolvedValue([offer1, offer2]);
+    mockEligibility.verifySellerEligibility.mockResolvedValue(eligibleSeller);
+
+    // Trigger multiple simultaneous evaluations for the SAME variant
+    const [res1, res2, res3] = await Promise.all([
+      evaluateBuyBoxForVariant('var-concurrent-1', mockPrisma),
+      evaluateBuyBoxForVariant('var-concurrent-1', mockPrisma),
+      evaluateBuyBoxForVariant('var-concurrent-1', mockPrisma),
+    ]);
+
+    expect(res1!.winningOfferId).toBe('off-cheap');
+    expect(res2!.winningOfferId).toBe('off-cheap');
+    expect(res3!.winningOfferId).toBe('off-cheap');
+
+    // Winner was determined deterministically across all executions
+    expect(res1!.winningOfferId).toBe(res2!.winningOfferId);
+    expect(res2!.winningOfferId).toBe(res3!.winningOfferId);
+  });
+
+  it('allows concurrent evaluations for DIFFERENT variants to execute in parallel', async () => {
+    const offerA = makeOffer({ id: 'off-A', variantId: 'var-A', price: 10000, stock: 10 });
+    const offerB = makeOffer({ id: 'off-B', variantId: 'var-B', price: 20000, stock: 10 });
+
+    mockPrisma.productOffer.findMany
+      .mockResolvedValueOnce([offerA])
+      .mockResolvedValueOnce([offerB]);
+
+    mockEligibility.verifySellerEligibility.mockResolvedValue(eligibleSeller);
+
+    const [resA, resB] = await Promise.all([
+      evaluateBuyBoxForVariant('var-A', mockPrisma),
+      evaluateBuyBoxForVariant('var-B', mockPrisma),
+    ]);
+
+    expect(resA!.variantId).toBe('var-A');
+    expect(resA!.winningOfferId).toBe('off-A');
+    expect(resB!.variantId).toBe('var-B');
+    expect(resB!.winningOfferId).toBe('off-B');
+  });
+
+  it('runWithRetry retries on transient PostgreSQL deadlock/serialization error and succeeds', async () => {
+    let callCount = 0;
+    const transientError: any = new Error('deadlock detected');
+    transientError.code = '40P01';
+
+    const operation = jest.fn(async () => {
+      callCount++;
+      if (callCount < 2) {
+        throw transientError;
+      }
+      return 'recovered-successfully';
+    });
+
+    const result = await runWithRetry(operation, 3);
+
+    expect(result).toBe('recovered-successfully');
+    expect(callCount).toBe(2);
+  });
+
+  it('runWithRetry fails immediately on permanent non-transient error', async () => {
+    let callCount = 0;
+    const fatalError: any = new Error('syntax error in query');
+    fatalError.code = '42601';
+
+    const operation = jest.fn(async () => {
+      callCount++;
+      throw fatalError;
+    });
+
+    await expect(runWithRetry(operation, 3)).rejects.toThrow('syntax error in query');
+    expect(callCount).toBe(1); // Did not retry
   });
 });

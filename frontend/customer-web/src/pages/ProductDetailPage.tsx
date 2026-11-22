@@ -13,7 +13,7 @@ const ChatDrawer = lazy(() =>
 );
 import { productsApi } from '@/api/products.api';
 import { storefrontApi, type PublicStore } from '@/api/storefront.api';
-import type { ProductReview, ProductVariant } from '@/types/product.types';
+import type { ProductOffer, ProductReview, ProductVariant } from '@/types/product.types';
 import { LoadingState } from '@/components/common/LoadingState';
 import { ProductRecommendations } from '@/components/product/ProductRecommendations';
 import { useAuth } from '@/hooks/useAuth';
@@ -26,6 +26,7 @@ export function ProductDetailPage() {
   const { isAuthenticated } = useAuth();
   const [reviews, setReviews] = useState<ProductReview[]>([]);
   const [variants, setVariants] = useState<ProductVariant[]>([]);
+  const [offers, setOffers] = useState<ProductOffer[]>([]);
   const [sellerStore, setSellerStore] = useState<PublicStore | null>(null);
 
   // The product's seller, resolved to a real store. storefrontApi dedupes and
@@ -59,6 +60,13 @@ export function ProductDetailPage() {
           logger.error('[ProductDetailPage] Failed to load variants:', err);
           setVariants([]);
         });
+
+      productsApi.getOffers(product.id)
+        .then(setOffers)
+        .catch((err) => {
+          logger.error('[ProductDetailPage] Failed to load offers:', err);
+          setOffers([]);
+        });
     }
   }, [product]);
 
@@ -89,7 +97,7 @@ export function ProductDetailPage() {
         <span className={styles.breadcrumbCurrent} aria-current="page">{product.name}</span>
       </nav>
 
-      <ProductDetails product={product} variants={variants} />
+      <ProductDetails product={product} variants={variants} offers={offers} />
 
       {/* ── Below the main product area ──────────────────────────────────
           Every block here is conditional on the data actually existing.

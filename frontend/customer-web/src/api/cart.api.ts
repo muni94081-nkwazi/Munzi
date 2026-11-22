@@ -11,6 +11,7 @@ interface BackendCartItem {
   id: string;
   productId: string;
   sellerId: string;
+  offerId?: string;
   productName: string;
   productImage: string;
   variantId?: string;
@@ -37,6 +38,7 @@ function toFrontendCart(raw: BackendCart): Cart {
     id: item.id,
     productId: item.productId,
     vendorId: item.sellerId,
+    offerId: item.offerId,
     productName: item.productName,
     productSku: item.variantId ?? item.productId,
     productImageUrl: item.productImage || null,
@@ -90,6 +92,7 @@ export const cartApi = {
     const { data } = await apiClient.post<ApiEnvelope<BackendCart>>('/cart/items', {
       productId: payload.productId,
       sellerId: payload.sellerId,
+      offerId: payload.offerId,
       productName: payload.productName,
       productImage: payload.productImage,
       price: payload.price,

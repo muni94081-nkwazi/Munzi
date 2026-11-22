@@ -10,6 +10,8 @@ import { ProductsPage } from '@/pages/ProductsPage';
 import { ProductCreatePage } from '@/pages/ProductCreatePage';
 import { ProductEditPage } from '@/pages/ProductEditPage';
 import { InventoryPage } from '@/pages/InventoryPage';
+import { OffersPage } from '@/pages/OffersPage';
+import { OfferCreatePage } from '@/pages/OfferCreatePage';
 import { OrdersPage } from '@/pages/OrdersPage';
 import { OrderFulfillmentPage } from '@/pages/OrderFulfillmentPage';
 import { PayoutsPage } from '@/pages/PayoutsPage';
@@ -67,6 +69,8 @@ export const router = createBrowserRouter([
               { path: 'products/new', element: <ProductCreatePage /> },
               { path: 'products/:id/edit', element: <ProductEditPage /> },
               { path: 'inventory', element: <InventoryPage /> },
+              { path: 'offers', element: <OffersPage /> },
+              { path: 'offers/new', element: <OfferCreatePage /> },
               { path: 'orders', element: <OrdersPage /> },
               { path: 'orders/:id', element: <OrderFulfillmentPage /> },
               { path: 'disputes-returns', element: <DisputesReturnsPage /> },

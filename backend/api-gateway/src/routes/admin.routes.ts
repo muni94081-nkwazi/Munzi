@@ -160,6 +160,7 @@ export function adminRoutes(targets: Record<string, string>): Router {
   route('/users',      targets.auth);
   route('/products',   targets.product);
   route('/offers',     targets.product); // offer moderation & quarantine queue
+  route('/buybox',     targets.product); // Buy Box administrative recalculation & evaluation
   route('/orders',     targets.order);
   route('/payments',   targets.payment);
   route('/categories', targets.product);

@@ -18,6 +18,8 @@ export const ROUTES = {
   PRODUCT_CREATE: '/products/new',
   PRODUCT_EDIT: '/products/:id/edit',
   INVENTORY: '/inventory',
+  OFFERS: '/offers',
+  OFFER_CREATE: '/offers/new',
   ORDERS: '/orders',
   ORDER_FULFILLMENT: '/orders/:id',
   PAYOUTS: '/payouts',

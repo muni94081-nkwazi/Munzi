@@ -4,6 +4,7 @@ import { ROUTES } from '../../router/routes';
 const navItems = [
   { label: 'Dashboard', path: ROUTES.DASHBOARD, icon: '📊' },
   { label: 'Products', path: ROUTES.PRODUCTS, icon: '📦' },
+  { label: 'Offers & Buy Box', path: ROUTES.OFFERS, icon: '🏷️' },
   { label: 'Inventory', path: ROUTES.INVENTORY, icon: '🏭' },
   { label: 'Orders', path: ROUTES.ORDERS, icon: '🛒' },
   { label: 'Disputes & Returns', path: '/disputes-returns', icon: '⚖️' },
