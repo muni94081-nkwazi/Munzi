@@ -2,6 +2,8 @@ import { configureStore } from '@reduxjs/toolkit';
 import cartReducer, { addCartItemThunk, fetchCartThunk, setCart } from '../cart.slice';
 import { cartApi, type AddCartItemInput, type Cart } from '@/api/cart.api';
 
+jest.mock('@/notifications/push', () => ({ registerPushToken: jest.fn() }));
+
 jest.mock('@/api/cart.api', () => ({
   cartApi: {
     getCart: jest.fn(),
@@ -52,6 +54,7 @@ describe('mobile cart slice - multi-vendor offer threading', () => {
           maxQuantity: 20,
           variantId: 'var-black',
           variantLabel: 'Black / M',
+          addedAt: new Date().toISOString(),
         },
       ],
       couponDiscount: 0,
@@ -110,6 +113,7 @@ describe('mobile cart slice - multi-vendor offer threading', () => {
           price: 15.0,
           quantity: 1,
           maxQuantity: 10,
+          addedAt: new Date().toISOString(),
         },
       ],
       couponDiscount: 0,
@@ -124,12 +128,9 @@ describe('mobile cart slice - multi-vendor offer threading', () => {
     const result = await store.dispatch(addCartItemThunk(legacyInput));
 
     expect(addCartItemThunk.fulfilled.match(result)).toBe(true);
-    expect(mockedCartApi.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        productId: 'prod-legacy',
-        offerId: undefined,
-      }),
-    );
+    const calledWith = mockedCartApi.addItem.mock.calls[0][0];
+    expect(calledWith.productId).toBe('prod-legacy');
+    expect(calledWith.offerId).toBeUndefined();
 
     const state = store.getState().cart;
     expect(state.items[0].offerId).toBeUndefined();
@@ -154,6 +155,7 @@ describe('mobile cart slice - multi-vendor offer threading', () => {
           price: 10,
           quantity: 1,
           maxQuantity: 5,
+          addedAt: '2026-11-21T00:00:00Z',
         },
         {
           id: 'line-b',
@@ -165,6 +167,7 @@ describe('mobile cart slice - multi-vendor offer threading', () => {
           price: 25,
           quantity: 2,
           maxQuantity: 10,
+          addedAt: '2026-11-21T00:00:00Z',
         },
       ],
       couponDiscount: 0,

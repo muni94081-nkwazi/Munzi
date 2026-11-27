@@ -389,7 +389,7 @@ export default function ProductDetailScreen() {
               />
               <Text style={styles.buyBoxBannerText}>
                 {selectedOffer.id === buyBoxWinner.id
-                  ? 'Featured Best Offer on Muni'
+                  ? 'Featured Best Offer on MUNZI'
                   : 'Alternative offer selected'}
               </Text>
               {selectedOffer.condition ? (

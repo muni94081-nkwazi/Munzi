@@ -75,7 +75,7 @@ export function ProductOffersList({
   return (
     <View style={styles.container}>
       <View style={styles.header}>
-        <Text style={styles.title}>Other Sellers on Muni</Text>
+        <Text style={styles.title}>Other Sellers on MUNZI</Text>
         <Text style={styles.subtitle}>
           Compare price, condition, and seller ratings ({offers.length} offer{offers.length === 1 ? '' : 's'})
         </Text>

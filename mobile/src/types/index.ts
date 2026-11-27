@@ -108,7 +108,7 @@ export interface WholesaleTier {
 export interface ProductOffer {
   id:              string;
   productId:       string;
-  variantId:       string;
+  variantId?:      string | null;
   sellerId:        string;
   sellerSku?:      string | null;
   price:           number;
@@ -116,12 +116,12 @@ export interface ProductOffer {
   currency:        string;
   condition:       ProductCondition;
   conditionNote?:  string | null;
-  moq:             number;
+  moq?:            number;
   wholesaleTiers?: WholesaleTier[] | null;
   isBuyBoxWinner:  boolean;
   status:          OfferStatus;
-  stock:           number;
-  reserved:        number;
+  stock?:          number;
+  reserved?:       number;
   lowStockThreshold?: number;
   isInStock?:      boolean;
   createdAt:       string;

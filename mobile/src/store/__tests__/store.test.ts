@@ -15,6 +15,7 @@ jest.mock('expo-secure-store', () => ({
   deleteItemAsync: jest.fn(async () => undefined),
 }));
 jest.mock('expo-router', () => ({ router: { replace: jest.fn(), push: jest.fn() } }));
+jest.mock('@/notifications/push', () => ({ registerPushToken: jest.fn() }));
 
 import { store } from '../index';
 import { setTokens, setUser, clearAuth } from '../auth.slice';

@@ -124,6 +124,7 @@ app.delete('/api/v1/products/:id/variants/:variantId',   requireSeller, variantC
 app.get   ('/api/v1/products/:id/offers',                     offerController.publicListForProduct);
 app.get   ('/api/v1/products/:id/variants/:variantId/offers', offerController.publicListForVariant);
 app.get   ('/api/v1/offers/:id',                              optionalAuth, offerController.publicGet);
+app.get   ('/api/v1/public/offers/:id',                       optionalAuth, offerController.publicGet);
 app.get   ('/api/v1/products/:id/buybox',                     offerController.getBuyBoxForProduct);
 app.get   ('/api/v1/products/variants/:variantId/buybox',     offerController.getBuyBoxForVariant);
 

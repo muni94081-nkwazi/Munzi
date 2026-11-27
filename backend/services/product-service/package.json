@@ -12,6 +12,8 @@
     "db:generate": "prisma generate",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
+    "backfill": "tsx src/scripts/backfill.cli.ts",
+    "buybox:activate": "tsx src/scripts/activate-buybox.cli.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json"
   },

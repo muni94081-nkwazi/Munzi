@@ -93,13 +93,19 @@ describe('mobile productsApi - multi-vendor offers and buybox', () => {
   describe('getBuyBox', () => {
     it('calls /api/v1/products/:id/buybox for canonical product', async () => {
       const mockBuyBox: BuyBoxResult = {
-        productId: 'prod-100',
-        winnerOfferId: 'offer-1',
-        sellerId: 'seller-abc',
-        price: 19.99,
-        condition: 'NEW',
-        currency: 'USD',
-        isCalculated: true,
+        winner: {
+          id: 'offer-1',
+          productId: 'prod-100',
+          sellerId: 'seller-abc',
+          price: 19.99,
+          currency: 'USD',
+          condition: 'NEW',
+          isBuyBoxWinner: true,
+          status: 'ACTIVE',
+          createdAt: new Date().toISOString(),
+        },
+        competingOffers: [],
+        totalOffers: 1,
       };
 
       mockedGet.mockResolvedValueOnce({
@@ -110,19 +116,25 @@ describe('mobile productsApi - multi-vendor offers and buybox', () => {
 
       expect(mockedGet).toHaveBeenCalledWith('/api/v1/products/prod-100/buybox');
       expect(result).toEqual(mockBuyBox);
-      expect(result?.winnerOfferId).toBe('offer-1');
+      expect(result?.winner?.id).toBe('offer-1');
     });
 
     it('calls /api/v1/products/variants/:variantId/buybox when variant is specified', async () => {
       const mockBuyBox: BuyBoxResult = {
-        productId: 'prod-100',
-        variantId: 'var-99',
-        winnerOfferId: 'offer-v1',
-        sellerId: 'seller-xyz',
-        price: 24.5,
-        condition: 'REFURBISHED',
-        currency: 'USD',
-        isCalculated: true,
+        winner: {
+          id: 'offer-v1',
+          productId: 'prod-100',
+          variantId: 'var-99',
+          sellerId: 'seller-xyz',
+          price: 24.5,
+          currency: 'USD',
+          condition: 'REFURBISHED',
+          isBuyBoxWinner: true,
+          status: 'ACTIVE',
+          createdAt: new Date().toISOString(),
+        },
+        competingOffers: [],
+        totalOffers: 1,
       };
 
       mockedGet.mockResolvedValueOnce({
@@ -132,7 +144,7 @@ describe('mobile productsApi - multi-vendor offers and buybox', () => {
       const result = await productsApi.getBuyBox('prod-100', 'var-99');
 
       expect(mockedGet).toHaveBeenCalledWith('/api/v1/products/variants/var-99/buybox');
-      expect(result?.variantId).toBe('var-99');
+      expect(result?.winner?.variantId).toBe('var-99');
     });
 
     it('returns null when buybox endpoint data is empty', async () => {

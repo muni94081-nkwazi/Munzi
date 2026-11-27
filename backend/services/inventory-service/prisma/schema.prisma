@@ -115,11 +115,12 @@ model ProductOffer {
 
 enum ProductCondition {
   NEW
-  LIKE_NEW
   REFURBISHED
-  USED_EXCELLENT
+  USED_LIKE_NEW
   USED_GOOD
   USED_FAIR
+  OPEN_BOX
+  FOR_PARTS
 }
 
 enum OfferStatus {

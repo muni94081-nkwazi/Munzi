@@ -96,9 +96,14 @@ app.get('/api/v1/orders/:id/invoice', requireAuth,            wrap(order.getInvo
 //
 // Authenticated: tiers are negotiated B2B pricing, and an order is placed for
 // the caller. `requireAuth` also gives the handlers a trustworthy buyer id.
-app.get ('/api/v1/wholesale/tiers',  requireAuth, wrap(wholesale.getTiers));
-app.get ('/api/v1/wholesale/orders', requireAuth, wrap(wholesale.listOrders));
-app.post('/api/v1/wholesale/orders', requireAuth, wrap(wholesale.createOrder));
+app.get   ('/api/v1/wholesale/tiers',                        requireAuth, wrap(wholesale.getTiers));
+app.get   ('/api/v1/wholesale/orders',                       requireAuth, wrap(wholesale.listOrders));
+app.post  ('/api/v1/wholesale/orders',                      requireAuth, wrap(wholesale.createOrder));
+app.get   ('/api/v1/wholesale/orders/:id',                  requireAuth, wrap(wholesale.getOrderById));
+app.patch ('/api/v1/wholesale/orders/:id/status',           requireAuth, wrap(wholesale.updateStatus));
+app.post  ('/api/v1/wholesale/orders/:id/confirm-payment',  requireAuth, wrap(wholesale.confirmPayment));
+app.post  ('/api/v1/wholesale/orders/:id/release-escrow',   requireAuth, wrap(wholesale.releaseEscrow));
+app.post  ('/api/v1/wholesale/orders/:id/dispute',          requireAuth, wrap(wholesale.disputeOrder));
 
 // ─── Seller Sub-Order Routes ───────────────────────────────────────────────────
 app.get  ('/api/v1/seller/sub-orders',            requireAuth, wrap(order.listSellerSubOrders));
